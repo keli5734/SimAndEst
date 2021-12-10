@@ -1,0 +1,708 @@
+%%
+clear 
+clc 
+close all
+
+
+%% Model parameters 
+
+s_M = 3.3e+3; % 1e+3
+
+delta_MR = 1.1e-2; % 0.011
+
+k_m1 = 0.3; % TB paper (0.3, 2) % 0.36
+
+k_m2 = 0.3; % TB paper
+
+delta_M1 = 1.1e-2; % covid paper
+
+delta_M2 = 1.1e-2;
+
+
+ % Parameters in this section determine macrophage dynamics 
+
+s_V = 3; %5.448; 
+
+k1 = 0.4; %2e+3; % The maximal rate of MR -> M1 (0.4 TB paper)
+
+k2 = 0.4*1e-5; %5e-5; % The maximal rate of MR -> M2 
+
+k21 = 0;  %the maximal rate of M2 -> M1
+
+ 
+kappa_T = 0 * 1e-7;
+
+ 
+
+V50_M = 1.2e+7; %  Half-Sat of Virus on MR --> M1 
+
+alpha1 = 1e-4; % The effect of M2 on MR --> M1 
+
+D_50 = 1e+6; % Half-Sat of dead cells for MR -> M2
+
+ 
+
+% Viral infection parameters 
+
+g_T = 0.8;
+
+T_max = 7e+7;
+
+beta =  3e-8; %5.18e-08; 
+
+ 
+
+
+
+q_prime = 1e-5; %1e-5; % virus loss due to bind to macrophages
+
+delta_I = 3;
+
+delta_V = 20;
+
+ 
+
+kappa_F = 3; % infected cells killed by NK cells
+
+kappa_E =  2; %  5e-5 <--- this parameter can affect viral load
+
+kappa_MV = 0*7.68e-7; % Covid paper (estimated) 7.68e-7;
+
+kappa_AS =  400;
+
+t_50 = 10;
+
+ 
+
+ 
+
+ 
+
+% Dead cell parameters (CoVid paper)
+
+kappa_D = 8e-7;  % Smith et al.(2011) %8e-9; % the clearance rate of apoptotic cells by activated M1 macrophages
+
+delta_D = 2; % degration of dead cells
+
+ 
+
+% viral infections 
+
+ 
+
+p_I =  100;
+
+p_M = 0*8e-3;
+
+ 
+
+ 
+
+ 
+
+% Interferon parameters 
+
+q_FI = 2e-5;   % 8.54e-5 the rate of inteferons produced by infected cells [u_F]/cell/day 1e-5 (Cao et al.) 2.82 pg/ml/day from covid paper
+
+s_F = 1e-2;        % the effectiveness of inteferons reduce virus production
+
+q_FM = 4e-7;   % 1e-5; 3.56/(0.1*1e+6); %1.3/(5e+5);       % the rate of interferons produced by M1 
+
+delta_F = 2;   %18; % decay rate of interferons (Ref. Cao et al. 16) 2
+
+phi = 0.33;    % the rate of interferons turn T to R (Cao 0.33)
+
+xi_R = 2.6;   % the rate of R turns into T (Cao 2.6)
+
+ 
+
+
+
+
+%}
+
+% time setting of viral infection
+
+
+t0_inf = 0;
+t_end_inf = 14; % consider 14 days post inoculation of virus
+report_point_inf = (t_end_inf - t0_inf) * 24 + 1;
+report_time_inf = linspace(t0_inf, t_end_inf, report_point_inf);
+len_inf = length(report_time_inf);
+
+% Viral Variables 
+
+MR = zeros(1,len_inf);
+M1 = zeros(1,len_inf);
+M2 = zeros(1,len_inf);
+T = zeros(1,len_inf);
+I = zeros(1,len_inf);
+V = zeros(1,len_inf);
+F = zeros(1,len_inf);
+R = zeros(1,len_inf);
+D = zeros(1,len_inf);
+
+
+
+MR_inf0 = s_M / delta_MR;  % intial value of M in infection, equivalent to the number of M at day 1000 in the absence of infection
+M1_inf0 = 0; % intial value of M1 in infectione, quivalent to the number of M1 at day 1000 in the absence of infection
+M2_inf0 = 0;
+
+
+T0 = T_max;
+I0 = 0;
+V0 = 1e+2; 
+F0 = 0;
+R0 = 0;
+D0 = 0;
+
+
+
+
+
+MR(1) = MR_inf0;
+M1(1) = M1_inf0;
+M2(1) = M2_inf0;
+T(1) = T_max;
+V(1) = V0;
+
+
+
+init_inf = [MR_inf0,M1_inf0,M2_inf0,...
+            T0,I0,V0,F0,R0,D0]';
+
+% Model simulation 
+
+options = odeset('RelTol',1e-10,'AbsTol',1e-20); 
+
+
+
+[~,y_inf] = ode15s(@Rstan_simplified, report_time_inf, init_inf, options,...
+                       s_M, delta_MR,...
+                       s_V, k1, k2, alpha1,D_50, k_m1, k_m2,V50_M,...
+                       delta_M1,delta_M2,...
+                       g_T,T_max,beta,phi,xi_R,delta_I,kappa_F,...
+                       p_I,delta_V,...
+                       q_FI,q_FM,delta_F,kappa_D,delta_D,...
+                       kappa_E, kappa_AS, q_prime);
+                   
+                   
+                   
+%% 
+
+% plot check 
+
+figure(2)                   
+semilogy(report_time_inf, y_inf(:,6), 'LineWidth', 1.5)
+ylim([1e-1,1e+8])                 
+xlim([0,14]) 
+hold on 
+
+
+figure(3)
+semilogy(report_time_inf, y_inf(:,1) + y_inf(:,2) + y_inf(:,3), 'LineWidth', 1.5)
+hold on 
+
+
+%%
+
+measurement_time_point = [0,1,2,3,4,5,6,7];
+len_measurement_time_point = length(measurement_time_point);
+
+Detection_limit = 1;  % Detection limit 1 PFU/ml 
+measurement_error_sigma = 1; % measurement error 
+N_sample = 5; % collect 5 samples at each time point
+rng(30112021) % set seed. 
+measurement_error_viral_load = normrnd(0,measurement_error_sigma,[N_sample,len_measurement_time_point-1]); % measurement viral load error 
+measurement_error_macrophages = normrnd(0,measurement_error_sigma,[N_sample,len_measurement_time_point-1]); % measurment macrophage error 
+
+% each column represents 1 time point
+
+
+                   
+ 
+[~,true_curve] = ode15s(@Rstan_simplified, measurement_time_point, init_inf, options,...
+                       s_M, delta_MR,...
+                       s_V, k1, k2, alpha1,D_50, k_m1, k_m2,V50_M,...
+                       delta_M1,delta_M2,...
+                       g_T,T_max,beta,phi,xi_R,delta_I,kappa_F,...
+                       p_I,delta_V,...
+                       q_FI,q_FM,delta_F,kappa_D,delta_D,...
+                       kappa_E, kappa_AS, q_prime); 
+                   
+
+true_viral_load = true_curve(2:end,6);  
+true_macrophages = true_curve(2:end,1) + true_curve(2:end,2) + true_curve(2:end,3);
+
+V_value = zeros(N_sample,len_measurement_time_point-1); % exclude t = 0                   
+observation_viral_load = zeros(N_sample,len_measurement_time_point-1);
+observation_macrophages = zeros(N_sample,len_measurement_time_point-1);
+                   
+for i = 1 : N_sample
+    
+    for j = 1: len_measurement_time_point-1
+   
+    V_value(i,j) =  true_viral_load(j) * 10^measurement_error_viral_load(i,j);    
+    if log10(V_value(i,j)) < Detection_limit 
+        observation_viral_load(i,j) = 0;
+    else 
+        observation_viral_load(i,j) = V_value(i,j);
+    end 
+    
+    observation_macrophages(i,j) =  true_macrophages(j) * 10^measurement_error_macrophages(i,j); 
+    
+    
+    end 
+        
+end 
+
+
+
+median_viral_load = median(observation_viral_load);
+median_macrophage = median(observation_macrophages);
+
+ %%
+% check generated data 
+           
+figure(33)
+semilogy(report_time_inf, y_inf(:,6),'LineWidth',1.5)
+hold on 
+semilogy(measurement_time_point(2:end), observation_viral_load, 'ko','LineWidth',1.5)
+semilogy(measurement_time_point(2:end), median(observation_viral_load), 'r*','LineWidth',2)
+ylim([1,1e+10])
+xlim([0,t_end_inf])
+ylabel('Viral load')
+
+
+                         
+figure(34)
+semilogy(report_time_inf, y_inf(:,1)+y_inf(:,2)+y_inf(:,3),'LineWidth',1.5)
+hold on  
+semilogy(measurement_time_point(2:end), observation_macrophages, 'ko','LineWidth',1.5)
+semilogy(measurement_time_point(2:end), median(observation_macrophages), 'r*','LineWidth',2)
+ylabel('Total macrophages')
+                 
+
+
+%%
+% Here we implement simple ABC to estimate model parameters [beta, q_prime, s_V, q_FI, q_FM] 
+
+log_beta_range = [-10,-6];
+log_qprime_range = [-6,-4];
+sV_range = [0,1];
+log_qFI_range = [-8,-3];
+log_qFM_range = [-8,-3];
+log_R0_range = [0,2];
+
+
+N_target = 2e+2;
+N = 1;
+epsilon_V = 7;
+epsilon_M = 3.5;
+Parameter_stored = zeros(N_target, 6);
+wb = waitbar(0,'please wait');
+rng('default')
+
+while N <= N_target
+    
+   
+    
+    beta = 10^(log_beta_range(1) + (log_beta_range(2) - log_beta_range(1))*rand(1,1));
+    s_V = 10^(sV_range(1) + (sV_range(2) - sV_range(1))*rand(1,1));
+    q_FI = 10^(log_qFI_range(1) + (log_qFI_range(2) - log_qFI_range(1))*rand(1,1));
+    q_FM = 10^(log_qFM_range(1) + (log_qFM_range(2) - log_qFM_range(1))*rand(1,1));
+    q_prime = 10^(log_qprime_range(1) + (log_qprime_range(2) - log_qprime_range(1))*rand(1,1));
+    basic_reproduction_number = 10^(log_R0_range(1) + (log_R0_range(2) - log_R0_range(1))*rand(1,1));
+    p_I = basic_reproduction_number * delta_I * (delta_V + q_prime*3e+5) / (beta * 7e+7);
+
+
+   [~,y_prediction] = ode15s(@Rstan_simplified, measurement_time_point, init_inf, options,...
+                       s_M, delta_MR,...
+                       s_V, k1, k2, alpha1,D_50, k_m1, k_m2,V50_M,...
+                       delta_M1,delta_M2,...
+                       g_T,T_max,beta,phi,xi_R,delta_I,kappa_F,...
+                       p_I,delta_V,...
+                       q_FI,q_FM,delta_F,kappa_D,delta_D,...
+                       kappa_E, kappa_AS, q_prime); 
+                   
+                   V_prediction = log10( y_prediction(2:end,6) ); 
+                   M_prediction = log10( y_prediction(2:end,1) + y_prediction(2:end,2) + y_prediction(2:end,3) );
+                   
+                   for i = 1:7
+                        if V_prediction(i) < Detection_limit 
+                           V_prediction(i) = 0;
+                        end 
+                   end 
+                   
+                   distance_V = sum( (V_prediction - log10(median_viral_load)').^2 );  % distance function for viral load 
+                   distance_M = sum( (M_prediction - log10(median_macrophage)').^2 );  % distance function for macrophages
+                   
+                   
+                   
+                   measurement_time_point_check_end = [12, 13, 14];
+                   
+    [~,y_prediction_check_end] = ode15s(@Rstan_simplified, measurement_time_point_check_end, init_inf, options,...
+                       s_M, delta_MR,...
+                       s_V, k1, k2, alpha1,D_50, k_m1, k_m2,V50_M,...
+                       delta_M1,delta_M2,...
+                       g_T,T_max,beta,phi,xi_R,delta_I,kappa_F,...
+                       p_I,delta_V,...
+                       q_FI,q_FM,delta_F,kappa_D,delta_D,...
+                       kappa_E, kappa_AS, q_prime);   
+                   
+                  V_prediction_14days = log10( y_prediction_check_end(:,6) ); % all four days should be below than detection limit
+                  
+                  
+     [~,y_prediction_check_peak] = ode15s(@Rstan_simplified, report_time_inf, init_inf, options,...
+                       s_M, delta_MR,...
+                       s_V, k1, k2, alpha1,D_50, k_m1, k_m2,V50_M,...
+                       delta_M1,delta_M2,...
+                       g_T,T_max,beta,phi,xi_R,delta_I,kappa_F,...
+                       p_I,delta_V,...
+                       q_FI,q_FM,delta_F,kappa_D,delta_D,...
+                       kappa_E, kappa_AS, q_prime);         
+                  
+                   [~,peak_position] = max(y_prediction_check_peak(:,6));
+                   peak_time = (peak_position - 1)/24;
+                   
+       
+       
+                   
+                   
+                   if distance_V < epsilon_V && distance_M < epsilon_M 
+                       if isempty(V_prediction_14days < Detection_limit) == 0
+                           if peak_time > 1
+                                                                                 
+                       Parameter_stored(N,1) = beta;
+                       Parameter_stored(N,2) = s_V;
+                       Parameter_stored(N,3) = q_FI;
+                       Parameter_stored(N,4) = q_FM;
+                       Parameter_stored(N,5) = q_prime;
+                       Parameter_stored(N,6) = basic_reproduction_number;
+                       
+                        
+                       
+                       N = N + 1;
+                       
+                           end 
+                       end
+                   end 
+                   
+                   
+         waitbar((N-1)/N_target)          
+end
+close(wb)                      
+
+writematrix(Parameter_stored,'Simp-VM.xls')
+
+
+%%
+
+Parameter_stored_V = readtable('SimandEstVonly.xls');
+Parameter_stored_VM = readtable('SimandEstVandM.xls');
+%%
+
+
+s_M = 3.3e+3; % 1e+3
+
+delta_MR = 1.1e-2; % 0.011
+
+k_m1 = 0.3; % TB paper (0.3, 2) % 0.36
+
+k_m2 = 0.3; % TB paper
+
+delta_M1 = 1.1e-2; % covid paper
+
+delta_M2 = 1.1e-2;
+
+
+ % Parameters in this section determine macrophage dynamics 
+
+s_V = 3; %5.448; 
+
+k1 = 0.4; %2e+3; % The maximal rate of MR -> M1 (0.4 TB paper)
+
+k2 = 0.4*1e-5; %5e-5; % The maximal rate of MR -> M2 
+
+k21 = 0;  %the maximal rate of M2 -> M1
+
+ 
+kappa_T = 0 * 1e-7;
+
+ 
+
+V50_M = 1.2e+7; %  Half-Sat of Virus on MR --> M1 
+
+alpha1 = 1e-4; % The effect of M2 on MR --> M1 
+
+D_50 = 1e+6; % Half-Sat of dead cells for MR -> M2
+
+ 
+
+% Viral infection parameters 
+
+g_T = 0.8;
+
+T_max = 7e+7;
+
+beta =  3e-8; %5.18e-08; 
+
+ 
+
+
+
+q_prime = 1e-5; %1e-5; % virus loss due to bind to macrophages
+
+delta_I = 3;
+
+delta_V = 20;
+
+ 
+
+kappa_F = 3; % infected cells killed by NK cells
+
+kappa_E =  2; %  5e-5 <--- this parameter can affect viral load
+
+kappa_MV = 0*7.68e-7; % Covid paper (estimated) 7.68e-7;
+
+kappa_AS =  400;
+
+t_50 = 10;
+
+ 
+
+ 
+
+ 
+
+% Dead cell parameters (CoVid paper)
+
+kappa_D = 8e-7;  % Smith et al.(2011) %8e-9; % the clearance rate of apoptotic cells by activated M1 macrophages
+
+delta_D = 2; % degration of dead cells
+
+ 
+
+% viral infections 
+
+ 
+
+p_I =  100;
+
+p_M = 0*8e-3;
+
+ 
+
+ 
+
+ 
+
+% Interferon parameters 
+
+q_FI = 2e-5;   % 8.54e-5 the rate of inteferons produced by infected cells [u_F]/cell/day 1e-5 (Cao et al.) 2.82 pg/ml/day from covid paper
+
+s_F = 1e-2;        % the effectiveness of inteferons reduce virus production
+
+q_FM = 4e-7;   % 1e-5; 3.56/(0.1*1e+6); %1.3/(5e+5);       % the rate of interferons produced by M1 
+
+delta_F = 2;   %18; % decay rate of interferons (Ref. Cao et al. 16) 2
+
+phi = 0.33;    % the rate of interferons turn T to R (Cao 0.33)
+
+xi_R = 2.6;   % the rate of R turns into T (Cao 2.6)
+
+ 
+
+
+
+
+%}
+
+% time setting of viral infection
+
+
+t0_inf = 0;
+t_end_inf = 14; % consider 14 days post inoculation of virus
+report_point_inf = (t_end_inf - t0_inf) * 24 + 1;
+report_time_inf = linspace(t0_inf, t_end_inf, report_point_inf);
+len_inf = length(report_time_inf);
+
+% Viral Variables 
+
+MR = zeros(1,len_inf);
+M1 = zeros(1,len_inf);
+M2 = zeros(1,len_inf);
+T = zeros(1,len_inf);
+I = zeros(1,len_inf);
+V = zeros(1,len_inf);
+F = zeros(1,len_inf);
+R = zeros(1,len_inf);
+D = zeros(1,len_inf);
+
+
+
+MR_inf0 = s_M / delta_MR;  % intial value of M in infection, equivalent to the number of M at day 1000 in the absence of infection
+M1_inf0 = 0; % intial value of M1 in infectione, quivalent to the number of M1 at day 1000 in the absence of infection
+M2_inf0 = 0;
+
+
+T0 = T_max;
+I0 = 0;
+V0 = 1e+2; 
+F0 = 0;
+R0 = 0;
+D0 = 0;
+
+
+
+
+
+MR(1) = MR_inf0;
+M1(1) = M1_inf0;
+M2(1) = M2_inf0;
+T(1) = T_max;
+V(1) = V0;
+
+
+
+init_inf = [MR_inf0,M1_inf0,M2_inf0,...
+            T0,I0,V0,F0,R0,D0]';
+
+% Model simulation 
+
+options = odeset('RelTol',1e-10,'AbsTol',1e-20); 
+
+
+
+%%
+% check ABC predictions
+Parameter_stored_Sim_V = readtable('Simp-V.xls');
+beta = Parameter_stored_Sim_V.beta;
+s_V = Parameter_stored_Sim_V.s_V;
+q_FI = Parameter_stored_Sim_V.q_FI;
+q_FM = Parameter_stored_Sim_V.q_FM;
+q_prime = Parameter_stored_Sim_V.q_prime;
+reproduction_number = Parameter_stored_Sim_V.R_0;
+p_I = reproduction_number * delta_I .* (delta_V + q_prime*3e+5) ./ (beta * 7e+7);
+
+len_parameter = length(beta);
+
+%%
+Parameter_stored_Sim_VM = readtable('Simp-VM.xls');
+beta = Parameter_stored_Sim_VM.beta;
+s_V = Parameter_stored_Sim_VM.s_V;
+q_FI = Parameter_stored_Sim_VM.q_FI;
+q_FM = Parameter_stored_Sim_VM.q_FM;
+q_prime = Parameter_stored_Sim_VM.q_prime;
+reproduction_number = Parameter_stored_Sim_VM.R_0;
+p_I = reproduction_number * delta_I .* (delta_V + q_prime*3e+5) ./ (beta * 7e+7);
+
+len_parameter = length(beta);
+%%
+color1 = [0.65,0.65,0.65];
+color2 = [0.72,0.27,1];
+for i = 1:len_parameter
+
+ [~,y_ABC_predict] = ode15s(@Rstan_simplified, report_time_inf, init_inf, options,...
+                       s_M, delta_MR,...
+                       s_V(i), k1, k2, alpha1,D_50, k_m1, k_m2,V50_M,...
+                       delta_M1,delta_M2,...
+                       g_T,T_max,beta(i),phi,xi_R,delta_I,kappa_F,...
+                       p_I(i),delta_V,...
+                       q_FI(i),q_FM(i),delta_F,kappa_D,delta_D,...
+                       kappa_E, kappa_AS, q_prime(i)); 
+                   
+        if reproduction_number(i) >= 10 
+            my_color = color2;
+        else 
+            my_color = color1;
+        end 
+  
+        
+        figure(1)                   
+        semilogy(report_time_inf, y_ABC_predict(:,6), 'Color',my_color,'LineWidth', 1.5)                
+        hold on 
+        ylim([1e-1,1e+9]) 
+        
+        figure(2)                   
+        semilogy(report_time_inf, y_ABC_predict(:,1) + y_ABC_predict(:,2) + y_ABC_predict(:,3),'Color',my_color,'LineWidth', 1.5)        
+        hold on 
+      
+
+ 
+
+end 
+
+figure(1)
+semilogy(measurement_time_point(2:end), median_viral_load, 'r*','LineWidth', 3)
+
+figure(2)
+semilogy(measurement_time_point(2:end), median_macrophage, 'r*','LineWidth', 3)
+
+
+%%
+
+
+
+beta1 = Parameter_stored_Sim_V.beta;
+s_V1 = Parameter_stored_Sim_V.s_V;
+q_FI1 = Parameter_stored_Sim_V.q_FI;
+q_FM1 = Parameter_stored_Sim_V.q_FM;
+q_prime1 = Parameter_stored_Sim_V.q_prime;
+reproduction_number1 = Parameter_stored_Sim_V.R_0;
+
+
+
+beta2 = Parameter_stored_Sim_VM.beta;
+s_V2 = Parameter_stored_Sim_VM.s_V;
+q_FI2 = Parameter_stored_Sim_VM.q_FI;
+q_FM2 = Parameter_stored_Sim_VM.q_FM;
+q_prime2 = Parameter_stored_Sim_VM.q_prime;
+reproduction_number2 = Parameter_stored_Sim_VM.R_0;
+
+
+
+
+variables_V = [beta1,s_V1,q_FI1,q_FM1,q_prime1,reproduction_number1];
+variables_mean_V = log10(mean(variables_V));
+
+
+variables_VM = [beta2,s_V2,q_FI2,q_FM2,q_prime2,reproduction_number2];
+variables_mean_VM = log10(mean(variables_VM));
+
+variables_baseline = log10([3e-8,3,2e-5,4e-7,1e-5,3.0435]);
+x_var = {'log_{10}(\beta)','log_{10}(s_V)','log_{10}(q_{FI})','log_{10}(q_{FM})','log_{10}(q^{\prime})', 'log_{10}(R_0)'};
+n_xvar = length(x_var);
+
+log_beta_range = [-10,-6];
+sV_range = [0,1];
+log_qFI_range = [-8,-3];
+log_qFM_range = [-8,-3];
+log_qprime_range = [-6,-4];
+log_R0_range = [0,2];
+
+
+parameter_range_log = {log_beta_range;   
+                   sV_range;
+                   log_qFI_range;
+                   log_qFM_range;
+                   log_qprime_range;
+                   log_R0_range};
+                          
+
+
+
+for i = 1:n_xvar
+    figure(i+55)
+    my_histogram(log10(variables_V(:,i)),parameter_range_log{i},20,'b',0.5)
+    hold on 
+    my_histogram(log10(variables_VM(:,i)),parameter_range_log{i},20, 'g',0.5)
+    xline(variables_mean_V(i),'b','LineWidth',1.5);
+    xline(variables_mean_VM(i),'g','LineWidth',1.5);
+    xline(variables_baseline(i), 'k','LineWidth',2);
+    xlabel(x_var{i})
+    legend('V', 'V + M')
+    set(gca,'FontSize',18)
+end 
+
+
