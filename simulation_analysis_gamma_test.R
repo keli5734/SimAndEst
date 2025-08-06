@@ -6,6 +6,7 @@ sim.hh.func.fixed <- function(N,
                               p.comm.base.infant.fix = 0.001,
                               p.comm.multiplier.sibling = 1,
                               p.comm.multiplier.parent = 1,
+                              p.comm.multiplier.elder = 1,
                               
                               p.daycare.infant = 0.72,
                               dayc.age.mean = 3.9,
@@ -15,6 +16,7 @@ sim.hh.func.fixed <- function(N,
                               p.hh.base.infant = 0.1,
                               p.hh.multiplier.sibling=1,
                               p.hh.multiplier.parent=1,
+                              p.hh.multiplier.elder=1,
                               
                               p.imm.base.sibling = 0.5,
                               p.imm.base.parent = 0.9, 
@@ -90,8 +92,9 @@ sim.hh.func.fixed <- function(N,
 
   p.comm.init <- p.comm.base.infant.fix * exp(amplitude * cos((2*pi*(1+40*7)/365.25) + phase))
   p.comm.init.vec <- ifelse(hh.roles=="infant", p.comm.init,
-                            ifelse(hh.roles %in% c("adult","elder"), p.comm.init * p.comm.multiplier.parent,
-                                   p.comm.init * p.comm.multiplier.sibling))
+                            ifelse(hh.roles=="sibling", p.comm.init * p.comm.multiplier.sibling,
+                                   ifelse(hh.roles=="adult", p.comm.init * p.comm.multiplier.parent,
+                                          p.comm.init * p.comm.multiplier.elder)))
   latent[1,1,] <- ifelse(immune[1,] >0, 0, rbinom(hh.size, 1, p.comm.init.vec))   #1st of the 4 latent classes
 
   infectious[1,1,] <- 0 #first of the 4 infectious classes
@@ -114,13 +117,19 @@ sim.hh.func.fixed <- function(N,
         partial.immunity = partial.immunity.infant
         duration.infect = duration.infect.inf
 
-      } else if(hh.roles[j] %in% c("adult","elder")){
+      } else if(hh.roles[j]=="sibling"){
+        p.comm = p.comm.base.infant * p.comm.multiplier.sibling
+        partial.immunity = partial.immunity.sibling
+        duration.infect = duration.infect.inf*multiplier.dur.sibpar
+
+      } else if(hh.roles[j]=="adult"){
         p.comm = p.comm.base.infant * p.comm.multiplier.parent
         partial.immunity = partial.immunity.parent
         duration.infect = duration.infect.inf*multiplier.dur.sibpar
-      }else{
-        p.comm = p.comm.base.infant * p.comm.multiplier.sibling
-        partial.immunity = partial.immunity.sibling
+
+      } else {
+        p.comm = p.comm.base.infant * p.comm.multiplier.elder
+        partial.immunity = partial.immunity.parent
         duration.infect = duration.infect.inf*multiplier.dur.sibpar
 
       }
@@ -129,7 +138,8 @@ sim.hh.func.fixed <- function(N,
       # contribution of household infection by type of infectious contact.
       N.infectious.infant  <- sum(infectious[,(i-1),hh.roles=="infant"])
       N.infectious.sibling <- sum(infectious[,(i-1),hh.roles=="sibling"])
-      N.infectious.parent <- sum(infectious[,(i-1),hh.roles %in% c("adult","elder")])
+      N.infectious.adult <- sum(infectious[,(i-1),hh.roles=="adult"])
+      N.infectious.elder <- sum(infectious[,(i-1),hh.roles=="elder"])
       
       # log.p.comm <- log(p.comm.base.infant) + vax.status*log((1-VE_susceptibility/100))
       # p.comm <- exp(log.p.comm)
@@ -145,9 +155,10 @@ sim.hh.func.fixed <- function(N,
       
       #need to exponentiate these by the number of infectious HH members in each category
 
-      log.qi <- log(1 - p.comm) + N.infectious.infant*log(1-p.hh.base.infant) + 
-                                  N.infectious.sibling*log(1-p.hh.base.infant* p.hh.multiplier.sibling) + 
-                                  N.infectious.parent*log(1-p.hh.base.infant * p.hh.multiplier.parent) 
+      log.qi <- log(1 - p.comm) + N.infectious.infant*log(1-p.hh.base.infant) +
+                                  N.infectious.sibling*log(1-p.hh.base.infant* p.hh.multiplier.sibling) +
+                                  N.infectious.adult*log(1-p.hh.base.infant * p.hh.multiplier.parent) +
+                                  N.infectious.elder*log(1-p.hh.base.infant * p.hh.multiplier.elder)
       
       qi <- exp(log.qi)
       
