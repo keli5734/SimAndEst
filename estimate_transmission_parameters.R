@@ -1,79 +1,63 @@
-source("simulation_analysis_gamma_test.R")
+# Chain binomial parameter estimation with age-dependent risks
 
-# Function to simulate a set of households
-simulate_households <- function(n_households, ...) {
-  do.call(rbind, lapply(1:n_households, function(i) sim.hh.func.fixed(N = i, ...)))
+log1mexp <- function(x) { ifelse(x < log(0.5), log1p(-exp(x)), log(-expm1(x))) }
+
+# Negative log-likelihood: community and household transmission depend on age
+negll <- function(par, dat, eps = 1e-10) {
+  delta0 <- par[1]; delta1 <- par[2]
+  alpha0 <- par[3]
+  gamma  <- c(0, par[4:6])
+  beta   <- c(0, par[7:9])
+
+  age <- dat$agegrp
+  p_comm <- exp(delta0 + gamma[age] + delta1 * dat$cases)
+  p_hh   <- exp(alpha0 + beta[age])
+
+  p_comm <- pmin(pmax(p_comm, eps), 1 - eps)
+  p_hh   <- pmin(pmax(p_hh,   eps), 1 - eps)
+
+  p_tot  <- 1 - (1 - p_comm) * (1 - p_hh) ^ dat$n_inf
+  p_tot  <- pmin(pmax(p_tot,  eps), 1 - eps)
+
+  -sum(dat$event * log(p_tot) + (1 - dat$event) * log1mexp(log(p_tot)))
 }
 
-# Summary statistics: infection and detection prevalence by role
-# Ensures all roles are represented; missing roles return 0
-summary_stats <- function(df) {
-  roles <- c("infant", "sibling", "adult", "elder")
-  stats <- sapply(roles, function(r) {
-    subset <- df[df$role == r, ]
-    infected <- if (nrow(subset) == 0) 0 else mean(subset$infected)
-    detected <- if (nrow(subset) == 0) 0 else mean(subset$detected.infected)
-    c(infected = infected, detected = detected)
-  })
-  c(stats["infected", ], stats["detected", ])
-}
-
-# Generate synthetic data with known parameters
 set.seed(123)
+n <- 1000
 true_params <- c(
-  p.comm.base.infant.fix = 0.001,
-  p.comm.multiplier.sibling = 1.2,
-  p.comm.multiplier.parent = 0.8,
-  p.comm.multiplier.elder = 1.5,
-  p.hh.base.infant = 0.1,
-  p.hh.multiplier.sibling = 1.3,
-  p.hh.multiplier.parent = 0.7,
-  p.hh.multiplier.elder = 1.1
+  delta0 = -5.5,
+  delta1 = 0.1,
+  alpha0 = -2,
+  gamma_sibling = 0.4,
+  gamma_parent = 0.2,
+  gamma_elder = 0.6,
+  beta_sibling = 0.3,
+  beta_parent = 0.1,
+  beta_elder = 0.5
 )
-obs <- simulate_households(
-  n_households = 50,
-  p.comm.base.infant.fix = true_params["p.comm.base.infant.fix"],
-  p.comm.multiplier.sibling = true_params["p.comm.multiplier.sibling"],
-  p.comm.multiplier.parent = true_params["p.comm.multiplier.parent"],
-  p.comm.multiplier.elder = true_params["p.comm.multiplier.elder"],
-  p.hh.base.infant = true_params["p.hh.base.infant"],
-  p.hh.multiplier.sibling = true_params["p.hh.multiplier.sibling"],
-  p.hh.multiplier.parent = true_params["p.hh.multiplier.parent"],
-  p.hh.multiplier.elder = true_params["p.hh.multiplier.elder"]
-)
-obs_stats <- summary_stats(obs)
 
-# Objective function to minimize
-objective <- function(par) {
-  sim <- simulate_households(
-    n_households = 50,
-    p.comm.base.infant.fix = par[1],
-    p.comm.multiplier.sibling = par[2],
-    p.comm.multiplier.parent = par[3],
-    p.comm.multiplier.elder = par[4],
-    p.hh.base.infant = par[5],
-    p.hh.multiplier.sibling = par[6],
-    p.hh.multiplier.parent = par[7],
-    p.hh.multiplier.elder = par[8]
-  )
-  sim_stats <- summary_stats(sim)
-  if (any(is.na(sim_stats))) {
-    return(Inf)
-  }
-  sum((sim_stats - obs_stats)^2)
-}
-
-# Initial guess and parameter bounds
-init <- c(0.005, 1, 1, 1, 0.2, 1, 1, 1)
-fit <- optim(
-  par = init,
-  fn = objective,
-  method = "L-BFGS-B",
-  lower = c(0, 0, 0, 0, 0, 0, 0, 0),
-  upper = c(1, 5, 5, 5, 1, 5, 5, 5)
+dat <- data.frame(
+  agegrp = sample(1:4, n, replace = TRUE),
+  cases  = runif(n),
+  n_inf  = sample(0:3, n, replace = TRUE)
 )
+
+gamma <- c(0, true_params["gamma_sibling"], true_params["gamma_parent"], true_params["gamma_elder"])
+beta  <- c(0, true_params["beta_sibling"], true_params["beta_parent"], true_params["beta_elder"])
+p_comm <- exp(true_params["delta0"] + gamma[dat$agegrp] + true_params["delta1"] * dat$cases)
+p_hh   <- exp(true_params["alpha0"] + beta[dat$agegrp])
+eps <- 1e-10
+p_comm <- pmin(pmax(p_comm, eps), 1 - eps)
+p_hh   <- pmin(pmax(p_hh,   eps), 1 - eps)
+p_tot  <- 1 - (1 - p_comm) * (1 - p_hh) ^ dat$n_inf
+p_tot  <- pmin(pmax(p_tot,  eps), 1 - eps)
+dat$event <- rbinom(n, 1, p_tot)
+
+init <- rep(0, 9)
+fit <- optim(init, negll, dat = dat, method = "L-BFGS-B")
 
 cat("True parameters:\n")
 print(true_params)
 cat("\nEstimated parameters:\n")
 print(fit$par)
+
