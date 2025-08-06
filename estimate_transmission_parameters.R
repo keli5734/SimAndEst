@@ -23,36 +23,41 @@ negll <- function(par, dat, eps = 1e-10) {
 }
 
 set.seed(123)
-n <- 1000
+
+# Simulate dataset from the household transmission model ---------------------
+source("simulation_analysis_gamma_test.R")
+
+# True parameter values used to generate the data
 true_params <- c(
-  delta0 = -5.5,
-  delta1 = 0.1,
-  alpha0 = -2,
-  gamma_sibling = 0.4,
-  gamma_parent = 0.2,
-  gamma_elder = 0.6,
-  beta_sibling = 0.3,
-  beta_parent = 0.1,
-  beta_elder = 0.5
+  p.comm.base.infant.fix    = 0.001,
+  p.comm.multiplier.sibling = 1.5,
+  p.comm.multiplier.parent  = 0.8,
+  p.comm.multiplier.elder   = 0.5,
+  p.hh.base.infant          = 0.1,
+  p.hh.multiplier.sibling   = 0.4,
+  p.hh.multiplier.parent    = 0.2,
+  p.hh.multiplier.elder     = 0.3
 )
 
-dat <- data.frame(
-  agegrp = sample(1:4, n, replace = TRUE),
-  cases  = runif(n),
-  n_inf  = sample(0:3, n, replace = TRUE)
-)
+# Simulate multiple households and combine into a single dataset
+sim_list <- lapply(1:200, function(hh) {
+  do.call(sim.hh.func.fixed, c(list(N = hh), as.list(true_params)))
+})
+sim_dat <- do.call(rbind, sim_list)
 
-gamma <- c(0, true_params["gamma_sibling"], true_params["gamma_parent"], true_params["gamma_elder"])
-beta  <- c(0, true_params["beta_sibling"], true_params["beta_parent"], true_params["beta_elder"])
-p_comm <- exp(true_params["delta0"] + gamma[dat$agegrp] + true_params["delta1"] * dat$cases)
-p_hh   <- exp(true_params["alpha0"] + beta[dat$agegrp])
-eps <- 1e-10
-p_comm <- pmin(pmax(p_comm, eps), 1 - eps)
-p_hh   <- pmin(pmax(p_hh,   eps), 1 - eps)
-p_tot  <- 1 - (1 - p_comm) * (1 - p_hh) ^ dat$n_inf
-p_tot  <- pmin(pmax(p_tot,  eps), 1 - eps)
-dat$event <- rbinom(n, 1, p_tot)
+# Prepare data for likelihood calculation
+role_map <- c(infant = 1, sibling = 2, adult = 3, elder = 4)
+sim_dat$agegrp <- role_map[sim_dat$role]
 
+# Number of other infected household members
+hh_infections <- ave(sim_dat$infected, sim_dat$HH, FUN = function(x) sum(x))
+sim_dat$n_inf <- pmax(hh_infections - sim_dat$infected, 0)
+
+sim_dat$cases <- 0  # community cases placeholder
+dat <- sim_dat[, c("agegrp", "cases", "n_inf", "infected")]
+names(dat)[4] <- "event"
+
+# Fit parameters --------------------------------------------------------------
 init <- rep(0, 9)
 fit <- optim(init, negll, dat = dat, method = "L-BFGS-B")
 
