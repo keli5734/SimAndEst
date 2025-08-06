@@ -53,7 +53,14 @@ sim_dat$agegrp <- role_map[sim_dat$role]
 hh_infections <- ave(sim_dat$infected, sim_dat$HH, FUN = function(x) sum(x))
 sim_dat$n_inf <- pmax(hh_infections - sim_dat$infected, 0)
 
-sim_dat$cases <- 0  # community cases placeholder
+# Community cases: count index infections across households for each day
+first_inf_day <- sim_dat$first.infection.true.date
+first_inf_day[first_inf_day < 0] <- NA
+first_day_by_hh <- ave(first_inf_day, sim_dat$HH, FUN = function(x) min(x, na.rm = TRUE))
+is_index <- sim_dat$infected == 1 & first_inf_day == first_day_by_hh
+comm_case_counts <- table(first_inf_day[is_index])
+sim_dat$cases <- as.numeric(comm_case_counts[as.character(first_inf_day)])
+sim_dat$cases[is.na(sim_dat$cases)] <- 0
 dat <- sim_dat[, c("agegrp", "cases", "n_inf", "infected")]
 names(dat)[4] <- "event"
 
