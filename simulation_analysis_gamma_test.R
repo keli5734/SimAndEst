@@ -1,6 +1,6 @@
 #todo: set to detect on specivic days: 1,4,8,11...
 sim.hh.func.fixed <- function(N,
-                              hh.size = 4,
+                              hh.size = sample(3:7,1),
                               tests.per.week=3,
                               
                               p.comm.base.infant.fix = 0.001,
@@ -51,9 +51,23 @@ sim.hh.func.fixed <- function(N,
     test.days = c(test.days1,test.days2,test.days3)
   }
   test.days = sort(test.days)
-  
-  
-  daycare.attend <- rbinom(1, 1, p.daycare.infant) 
+  baseline.test.days <- test.days
+
+  # household composition -------------------------------------------------
+  # one infant, at least two adults, optional older siblings, up to two elders
+  n.adult.base <- 2
+  remaining <- hh.size - (1 + n.adult.base)
+  n.elder <- ifelse(remaining > 0, sample(0:min(2, remaining), 1), 0)
+  remaining <- remaining - n.elder
+  n.sib <- max(remaining, 0)
+
+  hh.roles <- c("infant",
+                rep("adult", n.adult.base),
+                rep("sibling", n.sib),
+                rep("elder", n.elder))
+
+
+  daycare.attend <- rbinom(1, 1, p.daycare.infant)
   daycare.start <- floor(daycare.attend* (rnorm(1, dayc.age.mean, dayc.age.sd)) *365.25/12) # attend daycare (0/1) * start at 3 or 4 (3/4)
   
   age <- seq(from = sample(1:183, 1, replace = TRUE), by= 1, length.out = time.steps ) # born between April and Nov - some not born yet at study start- ignored
@@ -61,21 +75,25 @@ sim.hh.func.fixed <- function(N,
   
   
   latent <- array(0, dim=c(4,time.steps,hh.size))
-  
+
   infectious <- array(0, dim=c(4,time.steps,hh.size))
-  
+
   immune <- matrix(NA, nrow=time.steps, ncol=hh.size)
   #vax <- matrix(NA, nrow=time.steps, ncol=hh.size)
-  
-  
-  immune[1,1] <- 0 # all infants are susceptibles
-  immune[1,c(2,3)] <- rbinom(2, 1, p.imm.base.parent) 
-  immune[1,4] <- rbinom(1, 1, p.imm.base.sibling)
 
-  
-  
-  latent[1,1,] <- if_else(immune[1,] >0, 0, rbinom(hh.size, 1, p.comm.base.infant.fix * exp(amplitude * cos((2*pi*(1+40*7)/365.25) + phase))))   #1st of the 4 latent classes
-  
+
+  immune[1, hh.roles=="infant"] <- 0 # all infants are susceptibles
+  immune[1, hh.roles %in% c("adult","elder")] <- rbinom(sum(hh.roles %in% c("adult","elder")), 1, p.imm.base.parent)
+  immune[1, hh.roles=="sibling"] <- rbinom(sum(hh.roles=="sibling"), 1, p.imm.base.sibling)
+
+
+
+  p.comm.init <- p.comm.base.infant.fix * exp(amplitude * cos((2*pi*(1+40*7)/365.25) + phase))
+  p.comm.init.vec <- ifelse(hh.roles=="infant", p.comm.init,
+                            ifelse(hh.roles %in% c("adult","elder"), p.comm.init * p.comm.multiplier.parent,
+                                   p.comm.init * p.comm.multiplier.sibling))
+  latent[1,1,] <- ifelse(immune[1,] >0, 0, rbinom(hh.size, 1, p.comm.init.vec))   #1st of the 4 latent classes
+
   infectious[1,1,] <- 0 #first of the 4 infectious classes
   
 
@@ -86,17 +104,17 @@ sim.hh.func.fixed <- function(N,
   for(i in 2:time.steps){
     
     p.comm.base.infant = p.comm.base.infant.fix * exp(amplitude * cos((2*pi*(i+40*7)/365.25) + phase))
-    p.comm.dayc.infant = if_else(daycare[i] >0 , p.dayc.multiplier.infant * daycare[i],1)
+    p.comm.dayc.infant = ifelse(daycare[i] >0 , p.dayc.multiplier.infant * daycare[i],1)
     
     for(j in 1:hh.size){
-      
+
       #Contribution of community infection
-      if(j==1){
+      if(hh.roles[j]=="infant"){
         p.comm = p.comm.base.infant * p.comm.dayc.infant
         partial.immunity = partial.immunity.infant
         duration.infect = duration.infect.inf
 
-      } else if(j %in% c(2,3)){
+      } else if(hh.roles[j] %in% c("adult","elder")){
         p.comm = p.comm.base.infant * p.comm.multiplier.parent
         partial.immunity = partial.immunity.parent
         duration.infect = duration.infect.inf*multiplier.dur.sibpar
@@ -104,14 +122,14 @@ sim.hh.func.fixed <- function(N,
         p.comm = p.comm.base.infant * p.comm.multiplier.sibling
         partial.immunity = partial.immunity.sibling
         duration.infect = duration.infect.inf*multiplier.dur.sibpar
-      
+
       }
-      
-      
+
+
       # contribution of household infection by type of infectious contact.
-      N.infectious.infant  <- sum(infectious[,(i-1),1])
-      N.infectious.sibling <- sum(infectious[,(i-1),4])
-      N.infectious.parent <- sum(infectious[,(i-1),2]) + sum(infectious[,(i-1),3])
+      N.infectious.infant  <- sum(infectious[,(i-1),hh.roles=="infant"])
+      N.infectious.sibling <- sum(infectious[,(i-1),hh.roles=="sibling"])
+      N.infectious.parent <- sum(infectious[,(i-1),hh.roles %in% c("adult","elder")])
       
       # log.p.comm <- log(p.comm.base.infant) + vax.status*log((1-VE_susceptibility/100))
       # p.comm <- exp(log.p.comm)
@@ -188,18 +206,38 @@ sim.hh.func.fixed <- function(N,
     }
   }
   
-  #Observation probability
-  #detect.inf <- infectious * rbinom(length(infectious),1, p.detect.day ) #detection of case ?
-  #if(delay==T){
-    detect.inf <- apply(infectious,c(2,3),sum)[test.days,] 
+  #Observation probability with dynamic testing ---------------------------------
+  latent2 <- apply(latent,c(2,3),sum) # sum across the 4 subclasses
+  infectious2 <- apply(infectious,c(2,3),sum) # sum across the 4 subclasses
 
-    latent2 <- apply(latent,c(2,3),sum) # sum across the 4 subclasses 
-    
-    infectious2 <- apply(infectious,c(2,3),sum) # sum across the 4 subclasses 
-    test <- apply(infectious,c(3),sum) # sum across the 4 subclasses 
-      # }else{
-  #   detect.inf <- latent[,test.days,] 
-  # }
+  test.schedule <- rep(FALSE, time.steps)
+  test.schedule[baseline.test.days] <- TRUE
+  detect.inf.full <- matrix(0, nrow=time.steps, ncol=hh.size)
+  daily.testing <- FALSE
+  neg.streak <- rep(0, hh.size)
+
+  for(d in 1:time.steps){
+    if(!test.schedule[d]) next
+    detect.inf.full[d,] <- infectious2[d,]
+    if(!daily.testing && any(detect.inf.full[d,] > 0)){
+      daily.testing <- TRUE
+      neg.streak <- ifelse(detect.inf.full[d,]==0,1,0)
+      if(d < time.steps) test.schedule[(d+1):time.steps] <- TRUE
+    } else if(daily.testing){
+      neg.streak <- neg.streak + (detect.inf.full[d,]==0)
+      neg.streak[detect.inf.full[d,]>0] <- 0
+      if(all(neg.streak >= 2)){
+        daily.testing <- FALSE
+        if(d < time.steps) test.schedule[(d+1):time.steps] <- FALSE
+        remaining <- baseline.test.days[baseline.test.days > d]
+        test.schedule[remaining] <- TRUE
+      }
+    }
+  }
+
+  test.days <- which(test.schedule)
+  detect.inf <- detect.inf_full[test.days,,drop=FALSE]
+  test <- apply(infectious,c(3),sum) # sum across the 4 subclasses
   
     n.true.infection <- apply(infectious2, 2, function(x) {
       b<-rle(x)
@@ -316,7 +354,9 @@ sim.hh.func.fixed <- function(N,
   
 
   
-  out.df <- cbind.data.frame('indiv.index'=1:hh.size,n.true.infection,n.detected.infection,
+  out.df <- cbind.data.frame('indiv.index'=1:hh.size,
+                             role=hh.roles,
+                             n.true.infection,n.detected.infection,
                              first.infection.detected.start,first.infection.detected.end,first.infection.true.date, first.infection.true.duration,first.infection.infectious.day,
                              second.infection.detected.start,second.infection.detected.end,second.infection.true.date,second.infection.true.duration,second.infection.infectious.day,
                              'HH'=N)
