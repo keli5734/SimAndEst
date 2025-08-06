@@ -7,11 +7,6 @@ sim.hh.func.fixed <- function(N,
                               p.comm.multiplier.sibling = 1,
                               p.comm.multiplier.parent = 1,
                               
-                              p.daycare.infant = 0.72,
-                              dayc.age.mean = 3.9,
-                              dayc.age.sd = 0.8,
-                              p.dayc.multiplier.infant = 1,
-                              
                               p.hh.base.infant = 0.1,
                               p.hh.multiplier.sibling=1,
                               p.hh.multiplier.parent=1,
@@ -67,13 +62,6 @@ sim.hh.func.fixed <- function(N,
                 rep("elder", n.elder))
 
 
-  daycare.attend <- rbinom(1, 1, p.daycare.infant)
-  daycare.start <- floor(daycare.attend* (rnorm(1, dayc.age.mean, dayc.age.sd)) *365.25/12) # attend daycare (0/1) * start at 3 or 4 (3/4)
-  
-  age <- seq(from = sample(1:183, 1, replace = TRUE), by= 1, length.out = time.steps ) # born between April and Nov - some not born yet at study start- ignored
-  daycare <- (age >= daycare.start)*daycare.attend 
-  
-  
   latent <- array(0, dim=c(4,time.steps,hh.size))
 
   infectious <- array(0, dim=c(4,time.steps,hh.size))
@@ -104,13 +92,12 @@ sim.hh.func.fixed <- function(N,
   for(i in 2:time.steps){
     
     p.comm.base.infant = p.comm.base.infant.fix * exp(amplitude * cos((2*pi*(i+40*7)/365.25) + phase))
-    p.comm.dayc.infant = ifelse(daycare[i] >0 , p.dayc.multiplier.infant * daycare[i],1)
-    
+
     for(j in 1:hh.size){
 
       #Contribution of community infection
       if(hh.roles[j]=="infant"){
-        p.comm = p.comm.base.infant * p.comm.dayc.infant
+        p.comm = p.comm.base.infant
         partial.immunity = partial.immunity.infant
         duration.infect = duration.infect.inf
 
