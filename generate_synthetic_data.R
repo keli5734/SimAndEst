@@ -84,12 +84,16 @@ sim.hh.func.fixed <- function(N,
   
   p.comm.init <- p.comm.base.infant.fix * exp(amplitude * cos((2*pi*(1+40*7)/365.25) + phase))
   p.comm.init.vec <- ifelse(hh.roles=="infant", p.comm.init,
-                            ifelse(hh.roles %in% c("adult"), p.comm.init * p.comm.multiplier.parent, 
+                            ifelse(hh.roles %in% c("adult"), p.comm.init * p.comm.multiplier.parent,
                                    ifelse(hh.roles == "elder", p.comm.init * p.comm.multiplier.elder,
                                    p.comm.init * p.comm.multiplier.sibling)))
   latent[1,1,] <- ifelse(immune[1,] >0, 0, rbinom(hh.size, 1, p.comm.init.vec))   #1st of the 4 latent classes
-  
+
   infectious[1,1,] <- 0 #first of the 4 infectious classes
+
+  # store community risk for each individual and day
+  p_comm_mat <- matrix(NA, nrow = time.steps, ncol = hh.size)
+  p_comm_mat[1, ] <- p.comm.init.vec
   
   
   
@@ -120,8 +124,11 @@ sim.hh.func.fixed <- function(N,
         p.comm = p.comm.base.infant * p.comm.multiplier.sibling
         partial.immunity = partial.immunity.sibling
         duration.infect = duration.infect.inf*multiplier.dur.sibpar
-        
+
       }
+
+      # record community risk for this individual on this day
+      p_comm_mat[i, j] <- p.comm
       
       
       # contribution of household infection by type of infectious contact.
@@ -210,16 +217,17 @@ sim.hh.func.fixed <- function(N,
   #Observation probability with dynamic testing ---------------------------------
   latent2 <- apply(latent,c(2,3),sum) # sum across the 4 subclasses
   infectious2 <- apply(infectious,c(2,3),sum) # sum across the 4 subclasses
-  
+  infected <- (latent2 + infectious2) > 0
+
   test.schedule <- rep(FALSE, time.steps)
   test.schedule[baseline.test.days] <- TRUE
   detect.inf_full <- matrix(0, nrow=time.steps, ncol=hh.size)
   daily.testing <- FALSE
   neg.streak <- rep(0, hh.size)
-  
+
   for(d in 1:time.steps){
     if(!test.schedule[d]) next
-    detect.inf_full[d,] <- infectious2[d,]
+    detect.inf_full[d,] <- rbinom(hh.size, 1, infected[d,] * p.detect)
     if(!daily.testing && any(detect.inf_full[d,] > 0)){
       daily.testing <- TRUE
       neg.streak <- ifelse(detect.inf_full[d,]==0,1,0)
@@ -227,7 +235,7 @@ sim.hh.func.fixed <- function(N,
     } else if(daily.testing){
       neg.streak <- neg.streak + (detect.inf_full[d,]==0)
       neg.streak[detect.inf_full[d,]>0] <- 0
-      if(all(neg.streak >= 2)){
+      if(all(neg_streak >= 2)){
         daily.testing <- FALSE
         if(d < time.steps) test.schedule[(d+1):time.steps] <- FALSE
         remaining <- baseline.test.days[baseline.test.days > d]
@@ -235,137 +243,16 @@ sim.hh.func.fixed <- function(N,
       }
     }
   }
-  
+
   test.days <- which(test.schedule)
-  detect.inf <- detect.inf_full[test.days,,drop=FALSE]
-  test <- apply(infectious,c(3),sum) # sum across the 4 subclasses
-  
-  n.true.infection <- apply(infectious2, 2, function(x) {
-    b<-rle(x)
-    length(b$values[b$values == 1])
-  })
-  n.detected.infection <- apply(detect.inf, 2, function(x){
-    b<-rle(x)
-    length(b$values[b$values == 1])
-  })
-  
-  
-  first.infection.detected.start <- apply(detect.inf, 2, function(x){
-    if(sum(x)>0){ #if that person had an infection
-      z <- test.days[which(x==1)[1] ] #first detected infection day is the first of test = 1
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  second.infection.detected.start <- apply(detect.inf, 2, function(x){
-    b<-  rle(x)
-    if(length(b$values[b$values == 1])>1){ #if that person had 2 infections
-      z <- test.days[cumsum(b$lengths)[which(b$values == 1)[2]-1]+1]
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  first.infection.detected.end <- apply(detect.inf, 2, function(x){
-    if(sum(x)>0){
-      b<- rle(x)
-      z <- test.days[cumsum(b$lengths)[which(b$values == 1)[1]]]
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  second.infection.detected.end <- apply(detect.inf, 2, function(x){
-    b<-  rle(x)
-    if(length(b$values[b$values == 1])>1){
-      z <- test.days[cumsum(b$lengths)[which(b$values == 1)[2]]]
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  
-  #when is person actually INFECTED?
-  first.infection.true.date <- apply(latent2, 2, function(x){
-    if(sum(x)>0){
-      z <- which(x==1)[1] 
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  second.infection.true.date <- apply(latent2, 2, function(x){
-    b<-  rle(x)
-    if(length(b$values[b$values == 1])>1){
-      z <- cumsum(b$lengths)[which(b$values == 1)[2]-1]+1
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  
-  
-  first.infection.true.duration <- apply(infectious2, 2, function(x){
-    if(sum(x)>0){
-      b<-  rle(x)
-      z <- b$lengths[which(b$values == 1)][1]
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  second.infection.true.duration <- apply(infectious2, 2, function(x){
-    b<-  rle(x)
-    if(length(b$values[b$values == 1])>1){
-      z <- b$lengths[which(b$values == 1)][2] 
-    }else{
-      z=-9999
-    }
-    return(z)
-  })
-  
-  
-  first.infection.infectious.day <- apply(infectious2, 2, function(x){
-    if(sum(x)>0){
-      z2 <- rle(x)
-      z <- paste(which(x==1)[1]:(which(x==1)[1]+z2$lengths[which(z2$values==1)[1]]-1) , collapse=',')
-    }else{
-      z='9999'
-    }
-    return(z)
-  })
-  second.infection.infectious.day <- apply(infectious2, 2, function(x){
-    z2<-  rle(x)
-    if(length(z2$values[z2$values == 1])>1){
-      z <- paste((cumsum(z2$lengths)[which(z2$values == 1)[2]-1]+1):(cumsum(z2$lengths)[which(z2$values == 1)[2]] ), collapse=',')
-    }else{
-      z='9999'
-    }
-    return(as.character(z))
-  })
-  
-  
-  
-  
-  
-  out.df <- cbind.data.frame('indiv.index'=1:hh.size,
-                             role=hh.roles,
-                             n.true.infection,n.detected.infection,
-                             first.infection.detected.start,first.infection.detected.end,first.infection.true.date, first.infection.true.duration,first.infection.infectious.day,
-                             second.infection.detected.start,second.infection.detected.end,second.infection.true.date,second.infection.true.duration,second.infection.infectious.day,
-                             'HH'=N)
-  out.df$infected <- 1*( out.df$n.true.infection >0)
-  out.df$detected.infected <- 1*( out.df$n.detected.infection >0)
-  
-  return(out.df)
-  
-  #out.ls <- list('latent'=latent,'infectious'=infectious,'immune'=immune ,'first.infection.date'=first.infection.date,'vax.status'=vax.status)
-  
+  test_df <- data.frame(
+    HH = N,
+    individual_ID = rep(1:hh.size, each = length(test.days)),
+    role = rep(hh.roles, each = length(test.days)),
+    test_date = rep(test.days, times = hh.size),
+    infection_status = as.integer(as.vector(infected[test.days, ])),
+    community_risk = as.vector(p_comm_mat[test.days, ])
+  )
+
+  return(test_df)
 }
