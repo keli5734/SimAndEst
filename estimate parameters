@@ -1,0 +1,255 @@
+
+## ---------------------------------------------------------------------------
+## 2.  Define a common study calendar                                         ##
+## ---------------------------------------------------------------------------
+study_start <- as.Date("2024-09-21")            # same as before
+study_end <- as.Date("2025-04-17") 
+#   If your relative days (134 … 152) are counted from *day 0 = study_start*
+#   you can convert them directly:
+conv <- function(x) fifelse(is.na(x), as.Date(NA), study_start + as.integer(x))
+
+dt[, T_FP_date  := conv(first.infection.detected.start)]   # first pos PCR
+dt[, T_LP_date  := conv(first.infection.detected.end)]     # last  pos PCR
+dt[, inf_date   := conv(first.infection.true.date)]        # true infection
+dt[, inf_start_date := T_FP_date]                          # will refine
+dt[, inf_end_date   := T_LP_date]                          
+
+## – If your relative days use *another* origin, adjust `study_start`
+##   or subtract the correct offset before calling `conv()`.
+
+## ---------------------------------------------------------------------------
+## 3.  Recover the infectious window from the string list                     ##
+## ---------------------------------------------------------------------------
+parse_vec <- function(s){
+  if (is.na(s)) return(NA_integer_)
+  as.integer(strsplit(s, ",")[[1]])
+}
+
+dt[, `:=`( inf_win_start = sapply(first.infection.infectious.day,
+                                  \(s) min(parse_vec(s), na.rm = TRUE)),
+           inf_win_end   = sapply(first.infection.infectious.day,
+                                  \(s) max(parse_vec(s), na.rm = TRUE)) )]
+
+dt[is.finite(inf_win_start), 
+   inf_start_date := study_start + inf_win_start]
+dt[is.finite(inf_win_end),   
+   inf_end_date   := study_start + inf_win_end]
+
+## ---------------------------------------------------------------------------
+## 4.  Household‑level variables                                              ##
+## ---------------------------------------------------------------------------
+dt[, infected := !is.na(T_FP_date)]
+dt[, is_index := FALSE]
+
+## earliest detected infection in each HH = index
+dt[infected == TRUE,
+   is_index := T_FP_date == min(T_FP_date, na.rm = TRUE),
+   by = HH]
+
+## replace role with static age bands (infant, toddler, …) if needed
+dt[, age_cat :=
+     fifelse(role == "infant",  1L,
+             fifelse(role == "sibling", 2L,       # all “siblings” treated alike
+                     fifelse(role == "adult",   3L,
+                             fifelse(role == "elder",   4L, NA_integer_))))]
+
+if (any(is.na(dt$age_cat)))
+  stop("Unknown role labels remain – please extend the mapping.")
+
+## ---------------------------------------------------------------------------
+## 5.  Relative‑day indices required by the likelihood                        ##
+## ---------------------------------------------------------------------------
+dt[, `:=`( inf_day_rl            = as.integer(inf_date       - study_start),
+           infectious_day_rl     = as.integer(inf_start_date - study_start),
+           infectious_end_day_rl = as.integer(inf_end_date   - study_start))]
+
+## non‑infected individuals: leave as NA
+dt[!infected == T, c("inf_day_rl","infectious_day_rl",
+                "infectious_end_day_rl") := NA]
+
+## ---------------------------------------------------------------------------
+## 6.  Prepare columns matching your earlier pipeline                         ##
+## ---------------------------------------------------------------------------
+setnames(dt, "HH", "ID_hh")                         # same identifier names
+dt[, ID_indiv := sprintf("HH%03d_%02d", ID_hh, indiv.index)]
+
+
+
+## 3·3  Infection flags & index
+dt[, infected := !is.na(T_FP_date)]
+dt[, is_index := FALSE]
+dt[infected == TRUE,
+   is_index := T_FP_date == min(T_FP_date, na.rm = TRUE),
+   by = ID_hh]
+
+## 3·4  Observation window (full study for everybody)
+dt[, obs_start_date := study_start]
+dt[, obs_end_date   := study_end]
+
+
+
+###############################################################################
+## 4.  Relative‑day indices
+###############################################################################
+dt[, `:=`( inf_day_rl            = as.integer(inf_date       - study_start),
+           infectious_day_rl     = as.integer(inf_start_date - study_start),
+           infectious_end_day_rl = as.integer(inf_end_date   - study_start))]
+
+
+
+
+###############################################################################
+## 5.  Delay distribution parameters  (same for imputation & simulation)
+###############################################################################
+latent_par  <- list(shape = 2, scale = 1)
+report_par  <- list(shape = 1, scale = 1.5)
+infect_par  <- list(shape = 3, scale = 2)
+
+rtrunc_gamma <- function(n, shape, scale, upper){
+  upper[upper<=0] <- 1e-8
+  qgamma(runif(n)*pgamma(upper, shape, rate=1/scale),
+         shape = shape, rate = 1/scale)
+}
+
+###############################################################################
+## 6.  Likelihood with 4 age strata         (δ0 δ1 α0 γ2 γ3 γ4 β2 β3 β4)
+###############################################################################
+log1mexp <- function(x) ifelse(x>-0.693, log(-expm1(x)), log1p(-exp(x)))
+
+negll <- function(par, dat, lambda = 0.01, eps = 1e-10){
+  delta0 <- par[1]; delta1 <- par[2]; alpha0 <- par[3]
+  gamma  <- c(0, par[4:6])      # γ2 γ3 γ4     length = 4
+  beta   <- c(0, par[7:9])      # β2 β3 β4
+  
+  age <- dat$agegrp
+  p_comm <- exp(delta0 + gamma[age] + delta1 * dat$cases)
+  p_hh   <- exp(alpha0 + beta[age])
+  
+  p_comm <- pmin(pmax(p_comm, eps), 1-eps)
+  p_hh   <- pmin(pmax(p_hh,   eps), 1-eps)
+  
+  p_tot  <- 1 - (1 - p_comm) * (1 - p_hh)^dat$n_inf
+  p_tot  <- pmin(pmax(p_tot, eps), 1 - eps)
+  
+  -sum(dat$event * log(p_tot) +
+         (1 - dat$event) * log1mexp(log(p_tot))) +
+    lambda * (sum(gamma[-1]^2) + sum(beta[-1]^2))
+}
+
+###############################################################################
+## 7.  Multiple‑imputation + ML
+###############################################################################
+M <- 20                                       # imputations
+theta_mat <- matrix(NA_real_, M, 9)
+vcov_list <- vector("list", M)
+tmax = -as.integer(as.Date("2024-09-21") - as.Date("2025-04-17"))
+cases_t <- pmax(0, round(30*sin(2*pi*(0:tmax)/365) + rnorm(tmax+1, 0, 5)))
+
+start_par <- c(-6, 0.02, -2, rep(0, 6))       # length 9
+
+for (m in 1:M){
+  imp <- copy(dt)
+  
+  ## --- draw delays for infected individuals ---------------------------
+  idx <- which(imp$infected)
+  if (length(idx)){
+    max_back <- ifelse(is.na(imp$first.infection.true.duration[idx]),
+                       14,                              # fallback window
+                       imp$first.infection.true.duration[idx]) # if given
+    lat <- rtrunc_gamma(length(idx), 2, 1, max_back)
+    repd<- rtrunc_gamma(length(idx), 1, 1.5, pmax(max_back-lat,1e-8))
+    infd<- rgamma(length(idx), 3, rate=1/2)
+    
+    imp$inf_date[idx]       <- imp$T_FP_date[idx] - (lat + repd)
+    imp$inf_start_date[idx] <- imp$inf_date[idx]  + lat
+    imp$inf_end_date[idx]   <- imp$inf_start_date[idx] + infd
+    
+    imp$inf_day_rl[idx]            <- as.integer(imp$inf_date[idx]-study_start)
+    imp$infectious_day_rl[idx]     <- as.integer(imp$inf_start_date[idx]-study_start)
+    imp$infectious_end_day_rl[idx] <- as.integer(imp$inf_end_date[idx]-study_start)
+  }
+  
+  ## --- build person‑day table -----------------------------------------
+  rows <- list()
+  for (hh in unique(imp$ID_hh)){
+    hhdat <- imp[ID_hh == hh]
+    n_inf <- integer(tmax + 1)
+    for (j in hhdat[infected==TRUE]$ID_indiv){
+      r <- hhdat[ID_indiv == j]
+      a <- max(r$infectious_day_rl, 0, na.rm = TRUE)
+      b <- min(r$infectious_end_day_rl, tmax, na.rm = TRUE)
+      if (!is.na(a) && a <= b) n_inf[a:b+1L] <- n_inf[a:b+1L] + 1L
+    }
+    for (i in hhdat[is_index == FALSE]$ID_indiv){
+      rec <- hhdat[ID_indiv == i]; inf_d <- rec$inf_day_rl
+      for (d in 0:tmax){
+        if (!is.na(inf_d) && d > inf_d) break
+        rows[[length(rows)+1]] <- list(
+          agegrp = rec$age_cat,
+          n_inf  = n_inf[d+1L],
+          cases  = cases_t[d+1L],
+          event  = as.integer(!is.na(inf_d) && d == inf_d))
+      }
+    }
+  }
+  long <- rbindlist(rows)
+  
+  ## --- optimise --------------------------------------------------------
+  fit <- optim(start_par, fn = negll, dat = long, method = "BFGS",
+               hessian = F, control = list(maxit = 2e4))
+
+   
+    theta_mat[m,] <- fit$par
+    #vcov_list[[m]] <- vc
+  
+}
+
+###########################################################################
+## 8.  Simple comparison: mean estimate vs. truth  (no Rubin pooling)    ##
+###########################################################################
+## (Keep rows whose optimisation succeeded)
+keep <- complete.cases(theta_mat[,1])
+theta_mat <- theta_mat[keep,,drop = FALSE]
+
+mean_est <- colMeans(theta_mat)           # average across imputations
+
+par_names <- c("delta0","delta1","alpha0",
+               "gamma2","gamma3","gamma4",
+               "beta2","beta3","beta4")
+
+## ---- TRUE VALUES for the 4‑category model ----
+true_vec <- c(
+  delta0 = -9.5460625,
+  delta1 =  0.0000000,   # not used in this simulation
+  alpha0 = -1.2416909,
+  gamma2 =  1.4660192,
+  gamma3 =  0.6072984,
+  gamma4 =  0.6931472,
+  beta2  = -0.6409939,
+  beta3  = -0.2220275,
+  beta4  = -0.5093379
+)
+true_vec <- true_vec[par_names]           # align order
+
+## ---- summary table ----
+result <- data.table(
+  Parameter = par_names,
+  True      = round(true_vec, 3),
+  Estimate  = round(mean_est, 3),
+  Bias      = round(mean_est - true_vec, 3))
+
+cat("\n*** Mean of", nrow(theta_mat), "imputations (no Rubin pooling) ***\n")
+print(result)
+
+###############################################################################
+## 9.  Quick diagnostics
+###############################################################################
+## how many HH escaped infection naturally?
+escaped <- dt[, .(!any(infected)), by = ID_hh][, sum(V1)]
+cat("\nHouseholds with zero infections:", escaped, "of", uniqueN(dt$ID_hh), "\n")
+
+## optional plot: infection vs. role
+ggplot(dt[, .(Infected = mean(infected)), by = role],
+       aes(role, 100*Infected))+
+  geom_col(fill="steelblue")+labs(y="Attack rate (%)")+
+  theme_minimal()
