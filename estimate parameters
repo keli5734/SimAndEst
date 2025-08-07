@@ -8,7 +8,8 @@ library(ggplot2)
 source("generate_synthetic_data.R")
 
 set.seed(123)
-raw_dt <- sim.hh.func.fixed(N = 100)
+n_households <- 500  # increased sample size to reduce estimator bias
+raw_dt <- sim.hh.func.fixed(N = n_households)
 dt <- as.data.table(raw_dt)
 
 dt <- dt[, .(
@@ -168,15 +169,29 @@ negll <- function(par, dat, lambda = 0.01, eps = 1e-10){
 ###############################################################################
 ## 7.  Repeated imputation + ML
 ###############################################################################
-N <- 30                                       # number of repetitions
-theta_mat <- matrix(NA_real_, N, 9)
-vcov_list <- vector("list", N)
+n_runs <- 100                                 # number of repetitions
+theta_mat <- matrix(NA_real_, n_runs, 9)
+vcov_list <- vector("list", n_runs)
 tmax = -as.integer(as.Date("2024-09-21") - as.Date("2025-04-17"))
 cases_t <- pmax(0, round(30*sin(2*pi*(0:tmax)/365) + rnorm(tmax+1, 0, 5)))
 
 start_par <- c(-6, 0.02, -2, rep(0, 6))       # length 9
 
-for (m in 1:N){
+multi_start_optim <- function(start_par, fn, dat, n_start = 5, ...) {
+  best_fit <- NULL
+  best_val <- Inf
+  for (i in seq_len(n_start)) {
+    trial <- start_par + rnorm(length(start_par), 0, 1)
+    fit <- optim(trial, fn = fn, dat = dat, ...)
+    if (fit$value < best_val) {
+      best_val <- fit$value
+      best_fit <- fit
+    }
+  }
+  best_fit
+}
+
+for (m in 1:n_runs){
   imp <- copy(dt)
   
   ## --- draw delays for infected individuals ---------------------------
@@ -234,8 +249,9 @@ for (m in 1:N){
   long <- rbindlist(rows)
   
   ## --- optimise --------------------------------------------------------
-  fit <- optim(start_par, fn = negll, dat = long, method = "BFGS",
-               hessian = F, control = list(maxit = 2e4))
+  fit <- multi_start_optim(start_par, fn = negll, dat = long,
+                           n_start = 5, method = "BFGS",
+                           hessian = FALSE, control = list(maxit = 2e4))
 
    
     theta_mat[m,] <- fit$par
