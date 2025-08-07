@@ -1,39 +1,62 @@
 
-## ---------------------------------------------------------------------------
-## 2.  Define a common study calendar                                         ##
-## ---------------------------------------------------------------------------
+###############################################################################
+## 1.  Load raw synthetic data and summarise per individual                  ##
+###############################################################################
+library(data.table)
+library(ggplot2)
+
+source("generate_synthetic_data.R")
+
+set.seed(123)
+raw_dt <- sim.hh.func.fixed(N = 100)
+dt <- as.data.table(raw_dt)
+
+dt <- dt[order(test_date),
+         {
+           if (any(infection_status == 1)) {
+             pos_days  <- test_date[infection_status == 1]
+             first_pos <- min(pos_days)
+             neg_after <- test_date[infection_status == 0 & test_date > first_pos]
+             last_pos  <- if (length(neg_after))
+                             max(pos_days[pos_days < min(neg_after)])
+                           else
+                             max(pos_days)
+             last_neg  <- if (any(infection_status == 0 & test_date < first_pos))
+                             max(test_date[infection_status == 0 & test_date < first_pos])
+                           else NA_integer_
+             list(first.infection.detected.start = first_pos,
+                  first.infection.detected.end   = last_pos,
+                  last_negative                  = last_neg,
+                  role = role[1])
+           } else {
+             list(first.infection.detected.start = NA_integer_,
+                  first.infection.detected.end   = NA_integer_,
+                  last_negative                  = NA_integer_,
+                  role = role[1])
+           }
+         },
+         by = .(HH, individual_ID)]
+
+setnames(dt, "individual_ID", "indiv.index")
+
+###############################################################################
+## 2.  Define a common study calendar                                        ##
+###############################################################################
 study_start <- as.Date("2024-09-21")            # same as before
-study_end <- as.Date("2025-04-17") 
-#   If your relative days (134 … 152) are counted from *day 0 = study_start*
+study_end   <- as.Date("2025-04-17")
+#   If your relative days are counted from *day 0 = study_start*
 #   you can convert them directly:
 conv <- function(x) fifelse(is.na(x), as.Date(NA), study_start + as.integer(x))
 
-dt[, T_FP_date  := conv(first.infection.detected.start)]   # first pos PCR
-dt[, T_LP_date  := conv(first.infection.detected.end)]     # last  pos PCR
-dt[, inf_date   := conv(first.infection.true.date)]        # true infection
-dt[, inf_start_date := T_FP_date]                          # will refine
-dt[, inf_end_date   := T_LP_date]                          
+dt[, T_FP_date    := conv(first.infection.detected.start)]   # first pos PCR
+dt[, T_LP_date    := conv(first.infection.detected.end)]     # last  pos PCR
+dt[, last_neg_date:= conv(last_negative)]
+dt[, inf_date     := as.Date(NA)]                            # to be imputed
+dt[, inf_start_date := T_FP_date]                            # will refine
+dt[, inf_end_date   := T_LP_date]
 
 ## – If your relative days use *another* origin, adjust `study_start`
 ##   or subtract the correct offset before calling `conv()`.
-
-## ---------------------------------------------------------------------------
-## 3.  Recover the infectious window from the string list                     ##
-## ---------------------------------------------------------------------------
-parse_vec <- function(s){
-  if (is.na(s)) return(NA_integer_)
-  as.integer(strsplit(s, ",")[[1]])
-}
-
-dt[, `:=`( inf_win_start = sapply(first.infection.infectious.day,
-                                  \(s) min(parse_vec(s), na.rm = TRUE)),
-           inf_win_end   = sapply(first.infection.infectious.day,
-                                  \(s) max(parse_vec(s), na.rm = TRUE)) )]
-
-dt[is.finite(inf_win_start), 
-   inf_start_date := study_start + inf_win_start]
-dt[is.finite(inf_win_end),   
-   inf_end_date   := study_start + inf_win_end]
 
 ## ---------------------------------------------------------------------------
 ## 4.  Household‑level variables                                              ##
@@ -137,36 +160,46 @@ negll <- function(par, dat, lambda = 0.01, eps = 1e-10){
 }
 
 ###############################################################################
-## 7.  Multiple‑imputation + ML
+## 7.  Repeated imputation + ML
 ###############################################################################
-M <- 20                                       # imputations
-theta_mat <- matrix(NA_real_, M, 9)
-vcov_list <- vector("list", M)
+N <- 30                                       # number of repetitions
+theta_mat <- matrix(NA_real_, N, 9)
+vcov_list <- vector("list", N)
 tmax = -as.integer(as.Date("2024-09-21") - as.Date("2025-04-17"))
 cases_t <- pmax(0, round(30*sin(2*pi*(0:tmax)/365) + rnorm(tmax+1, 0, 5)))
 
 start_par <- c(-6, 0.02, -2, rep(0, 6))       # length 9
 
-for (m in 1:M){
+for (m in 1:N){
   imp <- copy(dt)
   
   ## --- draw delays for infected individuals ---------------------------
   idx <- which(imp$infected)
   if (length(idx)){
-    max_back <- ifelse(is.na(imp$first.infection.true.duration[idx]),
-                       14,                              # fallback window
-                       imp$first.infection.true.duration[idx]) # if given
-    lat <- rtrunc_gamma(length(idx), 2, 1, max_back)
-    repd<- rtrunc_gamma(length(idx), 1, 1.5, pmax(max_back-lat,1e-8))
-    infd<- rgamma(length(idx), 3, rate=1/2)
-    
-    imp$inf_date[idx]       <- imp$T_FP_date[idx] - (lat + repd)
-    imp$inf_start_date[idx] <- imp$inf_date[idx]  + lat
-    imp$inf_end_date[idx]   <- imp$inf_start_date[idx] + infd
-    
-    imp$inf_day_rl[idx]            <- as.integer(imp$inf_date[idx]-study_start)
-    imp$infectious_day_rl[idx]     <- as.integer(imp$inf_start_date[idx]-study_start)
-    imp$infectious_end_day_rl[idx] <- as.integer(imp$inf_end_date[idx]-study_start)
+    max_back <- ifelse(is.na(imp$last_neg_date[idx]),
+                       14,
+                       as.integer(imp$T_FP_date[idx] - imp$last_neg_date[idx]))
+    lat  <- rtrunc_gamma(length(idx), latent_par$shape, latent_par$scale, max_back)
+    repd <- rtrunc_gamma(length(idx), report_par$shape, report_par$scale,
+                         pmax(max_back - lat, 1e-8))
+    infd <- rgamma(length(idx), infect_par$shape, rate = 1/infect_par$scale)
+
+    imp$latent_delay[idx]   <- lat
+    imp$report_delay[idx]   <- repd
+    imp$infect_period[idx]  <- infd
+
+    imp$inf_date[idx] <- imp$T_FP_date[idx] - (lat + repd)
+    has_neg <- !is.na(imp$last_neg_date[idx])
+    imp$inf_date[idx][has_neg] <- pmax(imp$inf_date[idx][has_neg],
+                                       imp$last_neg_date[idx][has_neg] + 1)
+
+    imp$inf_start_date[idx] <- imp$inf_date[idx] + lat
+    imp$inf_end_date[idx]   <- pmin(imp$inf_start_date[idx] + infd,
+                                    imp$T_LP_date[idx])
+
+    imp$inf_day_rl[idx]            <- as.integer(imp$inf_date[idx]       - study_start)
+    imp$infectious_day_rl[idx]     <- as.integer(imp$inf_start_date[idx] - study_start)
+    imp$infectious_end_day_rl[idx] <- as.integer(imp$inf_end_date[idx]   - study_start)
   }
   
   ## --- build person‑day table -----------------------------------------
@@ -211,7 +244,7 @@ for (m in 1:M){
 keep <- complete.cases(theta_mat[,1])
 theta_mat <- theta_mat[keep,,drop = FALSE]
 
-mean_est <- colMeans(theta_mat)           # average across imputations
+mean_est <- colMeans(theta_mat)           # average across runs
 
 par_names <- c("delta0","delta1","alpha0",
                "gamma2","gamma3","gamma4",
@@ -238,7 +271,7 @@ result <- data.table(
   Estimate  = round(mean_est, 3),
   Bias      = round(mean_est - true_vec, 3))
 
-cat("\n*** Mean of", nrow(theta_mat), "imputations (no Rubin pooling) ***\n")
+cat("\n*** Mean of", nrow(theta_mat), "runs (no Rubin pooling) ***\n")
 print(result)
 
 ###############################################################################
