@@ -217,16 +217,17 @@ sim.hh.func.fixed <- function(N,
   #Observation probability with dynamic testing ---------------------------------
   latent2 <- apply(latent,c(2,3),sum) # sum across the 4 subclasses
   infectious2 <- apply(infectious,c(2,3),sum) # sum across the 4 subclasses
-  
+  infected <- (latent2 + infectious2) > 0
+
   test.schedule <- rep(FALSE, time.steps)
   test.schedule[baseline.test.days] <- TRUE
   detect.inf_full <- matrix(0, nrow=time.steps, ncol=hh.size)
   daily.testing <- FALSE
   neg.streak <- rep(0, hh.size)
-  
+
   for(d in 1:time.steps){
     if(!test.schedule[d]) next
-    detect.inf_full[d,] <- infectious2[d,]
+    detect.inf_full[d,] <- rbinom(hh.size, 1, infected[d,] * p.detect)
     if(!daily.testing && any(detect.inf_full[d,] > 0)){
       daily.testing <- TRUE
       neg.streak <- ifelse(detect.inf_full[d,]==0,1,0)
@@ -234,7 +235,7 @@ sim.hh.func.fixed <- function(N,
     } else if(daily.testing){
       neg.streak <- neg.streak + (detect.inf_full[d,]==0)
       neg.streak[detect.inf_full[d,]>0] <- 0
-      if(all(neg.streak >= 2)){
+      if(all(neg_streak >= 2)){
         daily.testing <- FALSE
         if(d < time.steps) test.schedule[(d+1):time.steps] <- FALSE
         remaining <- baseline.test.days[baseline.test.days > d]
@@ -244,8 +245,6 @@ sim.hh.func.fixed <- function(N,
   }
 
   test.days <- which(test.schedule)
-
-  infected <- (latent2 + infectious2) > 0
   test_df <- data.frame(
     HH = N,
     individual_ID = rep(1:hh.size, each = length(test.days)),
