@@ -149,7 +149,7 @@ df[, ID_indiv := as.character(ID_indiv)]
 ## 1.  Delay distributions                                   ##
 latent_par  <- list(shape = 2, scale = 1)
 report_par  <- list(shape = 1, scale = 1.5)
-infect_par  <- list(shape = 2, scale = 2.5) 
+infect_par  <- list(shape = 3, scale = 2)
 
 rtrunc_gamma <- function(n, shape, scale, upper) {
   # if upper == 0, return 0
@@ -162,9 +162,8 @@ rtrunc_gamma <- function(n, shape, scale, upper) {
 
 ## ------------------------------------------------------------
 ## 2.  Storage objects Storage for Monte‑Carlo output.    ##
-M <- 20                   # number of Monte‑Carlo imputations
+M <- 100                  # number of Monte‑Carlo imputations
 theta_mat <- matrix(NA_real_, M, 11)   # 11 parameters
-vcov_list <- vector("list",  M)
 
 ## ------------------------------------------------------------
 ## 3.  Helper functions                                       ##
@@ -175,28 +174,44 @@ log1mexp <- function(x) ifelse(x > -0.693,
 # exp(x) is almost 1, so the subtraction 1 - exp(x) loses many digits of
 # precision (“catastrophic cancellation”).
 
-negll <- function(par, dat, eps = 1e-10) {
-  
+negll <- function(par, dat, lambda = 0.01, eps = 1e-10) {
+
   delta0 <- par[1]; delta1 <- par[2]
   alpha0 <- par[3]
   gamma  <- c(0, par[4:7])           # γ2..γ5
   beta   <- c(0, par[8:11])          # β2..β5
-  
+
   age <- dat$agegrp
-  
+
   p_comm <- exp(delta0 + gamma[age] + delta1 * dat$cases)
   p_hh   <- exp(alpha0 + beta[age])
-  
+
   p_comm <- pmin(pmax(p_comm, eps), 1 - eps)
   p_hh   <- pmin(pmax(p_hh,   eps), 1 - eps)
-  
+
   p_tot  <- 1 - (1 - p_comm) * (1 - p_hh) ^ dat$n_inf
   p_tot  <- pmin(pmax(p_tot,  eps), 1 - eps) # p_tot between 0 and 1
-  
+
   LL =  -sum(dat$event * log(p_tot) + (1 - dat$event) * log1mexp(log(p_tot)))
-  
-  return(LL)
+
+  LL + lambda * (sum(gamma[-1]^2) + sum(beta[-1]^2))
 }
+
+multi_start_optim <- function(start_par, fn, dat, n_start = 5, ...) {
+  best_fit <- NULL
+  best_val <- Inf
+  for (i in seq_len(n_start)) {
+    trial <- start_par + rnorm(length(start_par), 0, 1)
+    fit <- optim(trial, fn = fn, dat = dat, ...)
+    if (fit$value < best_val) {
+      best_val <- fit$value
+      best_fit <- fit
+    }
+  }
+  best_fit
+}
+
+start_par <- c(-6, 0.02, -2, rep(0, 8))
 
 ## ------------------------------------------------------------
 ## 4.  Monte‑Carlo loop                                       ##
@@ -221,54 +236,32 @@ for (m in 1:M) {
   if (length(idx)) {
     
     ## --- 1.  compute per‑person back‑bound ---------------------------
-    max_back <- ifelse(
-      is.na(imp$T_RN_date[idx]),
-      as.integer(imp$T_FP_date[idx] - 7),    
-      as.integer(imp$T_FP_date[idx] - imp$T_RN_date[idx] - 1)
-    )
-    max_back[max_back < 1] <- 1        # keep a positive window
-    
+    max_back <- ifelse(is.na(imp$T_RN_date[idx]),
+                       14,
+                       as.integer(imp$T_FP_date[idx] - imp$T_RN_date[idx]))
+
     ## --- 2.  latent delay truncated at max_back ----------------------
-    lat <- rtrunc_gamma(length(idx),
-                        latent_par$shape,
-                        latent_par$scale,
-                        upper = max_back)
-    
+    lat  <- rtrunc_gamma(length(idx), latent_par$shape, latent_par$scale, max_back)
     ## --- 3.  report delay truncated at max_back - latent -------------
-    rem_space <- pmax(max_back - lat, 1e-10)
-    repd <- rtrunc_gamma(length(idx),
-                         report_par$shape,
-                         report_par$scale,
-                         upper = rem_space)
-    
+    repd <- rtrunc_gamma(length(idx), report_par$shape, report_par$scale,
+                         pmax(max_back - lat, 1e-8))
     ## --- 4.  infectious duration (right truncation later) ------------
-    infd <- rgamma(length(idx),
-                   infect_par$shape,
-                   rate = 1 / infect_par$scale)
-    
+    infd <- rgamma(length(idx), infect_par$shape, rate = 1 / infect_par$scale)
+
     ## --- 5.  construct timeline -------------------------------------
-    imp$inf_date[idx]        <- imp$T_FP_date[idx] - (lat + repd)
-    imp$inf_start_date[idx]  <- imp$inf_date[idx]  + lat
-    imp$inf_end_date[idx]    <- imp$inf_start_date[idx] + infd
-    
-    ## --- 6.  cap by resolution_date if available --------------------
-    has_res <- !is.na(imp$resolution_date[idx])
-    imp$inf_end_date[idx][has_res] <-
-      pmin(imp$inf_end_date[idx][has_res],
-           imp$resolution_date[idx][has_res])
-    
-    ## --- 7.  relative‑day indices -----------------------------------
-    
-    
+    imp$inf_date[idx] <- imp$T_FP_date[idx] - (lat + repd)
+    has_neg <- !is.na(imp$T_RN_date[idx])
+    imp$inf_date[idx][has_neg] <- pmax(imp$inf_date[idx][has_neg],
+                                       imp$T_RN_date[idx][has_neg] + 1)
+
+    imp$inf_start_date[idx] <- imp$inf_date[idx] + lat
+    imp$inf_end_date[idx]   <- pmin(imp$inf_start_date[idx] + infd,
+                                    imp$T_LP_date[idx])
+
+    ## --- 6.  relative‑day indices -----------------------------------
     imp$inf_day_rl[idx]            <- as.integer(imp$inf_date[idx]       - study_start)
-    
-    imp$infectious_day_rl[idx]     <- pmax(
-      as.integer(imp$inf_start_date[idx] - study_start),
-      as.integer(imp$obs_start_date[idx] - study_start))
-    
-    imp$infectious_end_day_rl[idx] <- pmin(
-      as.integer(imp$inf_end_date[idx]   - study_start),
-      as.integer(imp$obs_end_date[idx]   - study_start))
+    imp$infectious_day_rl[idx]     <- as.integer(imp$inf_start_date[idx] - study_start)
+    imp$infectious_end_day_rl[idx] <- as.integer(imp$inf_end_date[idx]   - study_start)
   }
   
   ## 4‑B  build person‑day table for ALL households ----------
@@ -277,126 +270,59 @@ for (m in 1:M) {
   for (hh in unique(imp$ID_hh)) {
     
     hhdat <- imp[ID_hh == hh]
-    
+
     ## --- A. daily count of infectious household members -------
     n_inf <- integer(tmax + 1)
-    for (j in hhdat[infected == TRUE]$ID_indiv) {
-      
-      rowj <- hhdat[ID_indiv == j]
-      
-      a <- max(rowj$infectious_day_rl,
-               as.integer(rowj$obs_start_date - study_start), 0, na.rm = TRUE)
-      b <- min(rowj$infectious_end_day_rl,
-               as.integer(rowj$obs_end_date   - study_start), tmax, na.rm = TRUE)
-      
-      if (!is.na(a) && a <= b)
-        n_inf[a:b + 1L] <- n_inf[a:b + 1L] + 1L
+    for (j in hhdat[infected==TRUE]$ID_indiv){
+      r <- hhdat[ID_indiv == j]
+      a <- max(r$infectious_day_rl, 0, na.rm = TRUE)
+      b <- min(r$infectious_end_day_rl, tmax, na.rm = TRUE)
+      if (!is.na(a) && a <= b) n_inf[a:b+1L] <- n_inf[a:b+1L] + 1L
     }
-    
-    ## --- B. susceptible rows with date‑specific age -----------
-    for (i in hhdat[is_index == FALSE]$ID_indiv) {
-      
-      rec   <- hhdat[ID_indiv == i]
-      inf_d <- rec$inf_day_rl                        # NA if never infected
-      
-      start_d <- max(0, as.integer(rec$obs_start_date - study_start))
-      end_d   <- min(tmax, as.integer(rec$obs_end_date - study_start))
-      
-      for (d in start_d:end_d) {
-        
-        if (!is.na(inf_d) && d > inf_d) break      # censor after infection
-        
-        this_date   <- study_start + d
-        age_years_d <- as.numeric(difftime(this_date,
-                                           rec$date_birth,
-                                           units = "days")) / 365.25
-        
+
+    ## --- B. susceptible rows --------------------------------
+    for (i in hhdat[is_index == FALSE]$ID_indiv){
+      rec <- hhdat[ID_indiv == i]; inf_d <- rec$inf_day_rl
+      for (d in 0:tmax){
+        if (!is.na(inf_d) && d > inf_d) break
         rows[[length(rows)+1]] <- list(
-          # descriptive additions --------------------------
-          ID_hh      = rec$ID_hh,
-          ID_indiv   = rec$ID_indiv,
-          age_years  = age_years_d,
-          date       = this_date,
-          
-          # likelihood covariates --------------------------
-          agegrp = as.integer(rec$age_cat),   # still static strata
-          n_inf  = n_inf[d + 1L],
-          cases  = cases_t[d + 1L],
-          event  = as.integer(!is.na(inf_d) && d == inf_d)
-        )
+          agegrp = as.integer(rec$age_cat),
+          n_inf  = n_inf[d+1L],
+          cases  = cases_t[d+1L],
+          event  = as.integer(!is.na(inf_d) && d == inf_d))
       }
     }
   }
-  
+
   long <- rbindlist(rows)
-  long$cases[is.na(long$cases)] <- 0        # keep numeric
-  long[, agegrp  := cut(age_years,
-                         breaks = c(-Inf,1,5,18,65,Inf),
-                         labels = 1:5, right = FALSE)]
-  
+  long$cases[is.na(long$cases)] <- 0
+
   ## 4‑C  fit ML --------------------------------------------
-  start <- c(-1, 0, -1, rep(.1,8))
-  fit <- try(
-    optim(start, 
-          fn = negll, 
-          dat = long,
-          hessian = TRUE,
-          control = list(maxit = 1e4)),
-          silent = TRUE
-  )
-  if (inherits(fit, "try-error")) next
-  
+  fit <- multi_start_optim(start_par, fn = negll, dat = long,
+                           n_start = 5, method = "BFGS",
+                           hessian = FALSE, control = list(maxit = 2e4))
   theta_mat[m, ] <- fit$par
-  vcov_list[[m]] <- tryCatch(solve(fit$hessian),
-                             error = function(e) diag(11)*NA)
 }
 
 
 
 
 ## ------------------------------------------------------------
-## 5.  Pool with Rubin’s rules                               ##
+## 5.  Simple average across imputations                      ##
 ## ------------------------------------------------------------
 
+keep <- complete.cases(theta_mat[,1])
+theta_mat <- theta_mat[keep,,drop = FALSE]
 
-keep <- complete.cases(theta_mat[,1])     # drop failed fits, if any
-theta_mat <- theta_mat[keep,,drop=FALSE]
-vcov_list <- vcov_list[keep]
-Mkeep <- nrow(theta_mat)
-## (a) pooled point estimate
-bbar <- colMeans(theta_mat)                               # β̄   (K×1)
-## (b) within‑imputation variance
-W <- Reduce("+", vcov_list) / Mkeep                       # W    (K×K)
-## (c) between‑imputation variance
-B <- crossprod(scale(theta_mat, center = bbar, scale = FALSE)) /
-  (Mkeep - 1)                                          # B    (K×K)
-## (d) total variance (Rubin / law of total variance)
-Tmat <- W + (1 + 1/Mkeep) * B                             # T    (K×K)
-se <- sqrt(diag(Tmat))                                    # SE   (K×1)
+mean_est <- colMeans(theta_mat)
 
-z <- qnorm(0.975)                 
-low  <- bbar - z * se
-high <- bbar + z * se
-
-## ------------------------------------------------------------
-## 6.  Output                                                ##
-## ------------------------------------------------------------
 par_names <- c("delta0","delta1","alpha0",
                paste0("gamma",2:5), paste0("beta",2:5))
 
-r   <- (1 + 1/Mkeep) * diag(B) / diag(W)     # λ = between / within
-df  <- (Mkeep - 1) * (1 + 1/r)^2             # Barnard‑Rubin
-
-
-
 result <- data.table(
   Parameter = par_names,
-  Estimate  = round(bbar, 3))
-  # SE        = round(se,    3),
-  # Low95     = round(low,   3),
-  # Upp95     = round(high,  3))
- 
+  Estimate  = round(mean_est, 3)
+)
 
-
-cat("\n### Pooled ML estimates over", Mkeep, "imputations\n")
-print(result, row.names = T)
+cat("\nMean of", nrow(theta_mat), "runs\n")
+print(result)
