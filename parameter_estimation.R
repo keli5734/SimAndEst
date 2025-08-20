@@ -1,5 +1,3 @@
- 
-setwd("/Users/ke/Library/CloudStorage/OneDrive-YaleUniversity/Postdoc projects/CN_household_transmisison_study/Rscript_package/")
 ###############################################################################
 ## 1.  Load raw synthetic data and summarise per individual                  ##
 ###############################################################################
@@ -16,7 +14,7 @@ n_households <- 50  # increased sample size to reduce estimator bias
 raw_dt <- pbapply::pblapply(
   1:n_households,
   sim.hh.func.fixed,
-  tests.per.week = 1,  # twice per week baseline testing
+  tests.per.week = 1,  # once per week baseline testing
   
   p.comm.base.infant.fix = 7.148217e-05,
   p.comm.multiplier.sibling = 4.331956e+00,
@@ -171,30 +169,33 @@ rtrunc_gamma <- function(n, shape, scale, upper){
 }
 
 ###############################################################################
-## 6.  Likelihood with 4 age strata         (δ0 δ1 α0 γ2 γ3 γ4 β2 β3 β4)
+## 6.  Likelihood with 4 age strata         (δ0 α0 γ2 γ3 γ4 β2 β3 β4)
 ###############################################################################
 log1mexp <- function(x) ifelse(x>-0.693, log(-expm1(x)), log1p(-exp(x)))
 
 negll <- function(par, dat, lambda = 0.01, eps = 1e-10){
-   
-  
-  delta0 <- par[1]; 
-  delta1 <- par[2]; 
-  
-  alpha0 <- par[3]
-  gamma  <- c(0, par[4:6])      # γ2 γ3 γ4     length = 4
-  beta   <- c(0, par[7:9])      # β2 β3 β4
-  
+
+
+  delta0 <- par[1]
+
+  alpha0 <- par[2]
+  gamma  <- c(0, par[3:5])      # γ2 γ3 γ4     length = 4
+  beta   <- c(0, par[6:8])      # β2 β3 β4
+
   age <- dat$agegrp
-  p_comm <- exp(delta0 + gamma[age] + delta1 * dat$cases)
-  p_hh   <- exp(alpha0 + beta[age])
-  
-  p_comm <- pmin(pmax(p_comm, eps), 1-eps)
-  p_hh   <- pmin(pmax(p_hh,   eps), 1-eps)
-  
-  p_tot  <- 1 - (1 - p_comm) * (1 - p_hh)^dat$n_inf
-  p_tot  <- pmin(pmax(p_tot, eps), 1 - eps)
-  
+  p_comm <- exp(delta0 + gamma[age])
+  p_comm <- pmin(pmax(p_comm, eps), 1 - eps)
+
+  p_hh <- exp(alpha0 + beta)    # per-contact infection prob by source age
+  p_hh <- pmin(pmax(p_hh, eps), 1 - eps)
+
+  q <- (1 - p_comm) *
+       (1 - p_hh[1])^dat$n_inf_infant *
+       (1 - p_hh[2])^dat$n_inf_sibling *
+       (1 - p_hh[3])^dat$n_inf_parent *
+       (1 - p_hh[4])^dat$n_inf_elder
+  p_tot <- pmin(pmax(1 - q, eps), 1 - eps)
+
   -sum(dat$event * log(p_tot) +
          (1 - dat$event) * log1mexp(log(p_tot))) +
     lambda * (sum(gamma[-1]^2) + sum(beta[-1]^2))
@@ -204,13 +205,11 @@ negll <- function(par, dat, lambda = 0.01, eps = 1e-10){
 ## 7.  Repeated imputation + ML
 ###############################################################################
 n_runs <- 1                               # number of repetitions
-theta_mat <- matrix(NA_real_, n_runs, 9)
+theta_mat <- matrix(NA_real_, n_runs, 8)
 vcov_list <- vector("list", n_runs)
 tmax = -as.integer(as.Date("2024-09-21") - as.Date("2025-04-17"))
-cases_t_raw <- pmax(0, round(30 * sin(2 * pi * (0:tmax) / 365) + rnorm(tmax + 1, 0, 5)))
-cases_t <- 0*(cases_t_raw - min(cases_t_raw)) / (max(cases_t_raw) - min(cases_t_raw))
 
-start_par <- c(0, 0, -2, rep(0, 6))       # length 9
+start_par <- c(0, -2, rep(0, 6))       # length 8
 
 multi_start_optim <- function(start_par, fn, dat, n_start = 5, ...) {
   best_fit <- NULL
@@ -268,26 +267,32 @@ for (m in 1:n_runs){
   rows <- list()
   for (hh in unique(imp$ID_hh)){
     hhdat <- imp[ID_hh == hh]
-    n_inf <- integer(tmax + 1)
+    n_inf <- matrix(0L, nrow = tmax + 1, ncol = 4)
     for (j in hhdat[infected==TRUE]$ID_indiv){
       r <- hhdat[ID_indiv == j]
       a <- max(r$infectious_day_rl, 0, na.rm = TRUE)
       b <- min(r$infectious_end_day_rl, tmax, na.rm = TRUE)
-      if (!is.na(a) && a <= b) n_inf[a:b+1L] <- n_inf[a:b+1L] + 1L
+      age_idx <- r$age_cat[1]
+      if (!is.na(a) && a <= b)
+        n_inf[a:b+1L, age_idx] <- n_inf[a:b+1L, age_idx] + 1L
     }
-    for (i in hhdat[is_index == FALSE]$ID_indiv){
-               rec <- hhdat[ID_indiv == i]; inf_d <- rec$inf_day_rl
-               for (d in 0:tmax){
-                   if (!is.na(inf_d) && d > inf_d) break
-                   rows[[length(rows)+1]] <- list(
-                       agegrp = rec$age_cat,
-                       n_inf  = n_inf[d+1L],
-                       cases  = cases_t[d+1L],
-                       event  = as.integer(!is.na(inf_d) && d == inf_d),
-                       ID_indiv = i)
-                 }
-             }
-         }
+    ## include all individuals (including the index case) so that
+    ## community infections contribute information to the likelihood
+    for (i in hhdat$ID_indiv){
+      rec <- hhdat[ID_indiv == i]; inf_d <- rec$inf_day_rl
+      for (d in 0:tmax){
+        if (!is.na(inf_d) && d > inf_d) break
+        rows[[length(rows)+1]] <- list(
+          agegrp = rec$age_cat,
+          n_inf_infant = n_inf[d+1L, 1],
+          n_inf_sibling = n_inf[d+1L, 2],
+          n_inf_parent = n_inf[d+1L, 3],
+          n_inf_elder  = n_inf[d+1L, 4],
+          event  = as.integer(!is.na(inf_d) && d == inf_d),
+          ID_indiv = i)
+      }
+    }
+  }
   long <- rbindlist(rows)
   
   ## --- optimise --------------------------------------------------------
@@ -310,7 +315,7 @@ theta_mat <- theta_mat[keep,,drop = FALSE]
 
 mean_est <- colMeans(theta_mat)           # average across runs
 
-par_names <- c("delta0","delta1","alpha0",
+par_names <- c("delta0","alpha0",
                "gamma2","gamma3","gamma4",
                "beta2","beta3","beta4")
 
@@ -321,7 +326,7 @@ true_vec <- c(
   gamma2 = log(7.148217e-05 * 4.331956e+00) - log(7.148217e-05),                # sibling multiplier
   gamma3 = log(7.148217e-05 * 1.835466e+00) - log(7.148217e-05),                # parent multiplier
   gamma4 = log(7.148217e-05 * 2) - log(7.148217e-05),                           # elder multiplier
-  
+
   # Household transmission
   alpha0 = log(0.2888953),                           # ≈ -1.242
   beta2  = log(0.2888953 * 0.5267686) - log(0.2888953), # sibling / infant
@@ -342,4 +347,3 @@ print(result)
 
 
 #saveRDS(result, "result.rds")
- 
