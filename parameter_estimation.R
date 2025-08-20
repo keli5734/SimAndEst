@@ -1,5 +1,3 @@
- 
-setwd("/Users/ke/Library/CloudStorage/OneDrive-YaleUniversity/Postdoc projects/CN_household_transmisison_study/Rscript_package/")
 ###############################################################################
 ## 1.  Load raw synthetic data and summarise per individual                  ##
 ###############################################################################
@@ -278,8 +276,12 @@ for (m in 1:n_runs){
       if (!is.na(a) && a <= b)
         n_inf[a:b+1L, age_idx] <- n_inf[a:b+1L, age_idx] + 1L
     }
+     ## include all individuals (including the index case) so that
+    ## community infections contribute information to the likelihood
+    for (i in hhdat$ID_indiv){
+ 
     for (i in hhdat[is_index == FALSE]$ID_indiv){
-      rec <- hhdat[ID_indiv == i]; inf_d <- rec$inf_day_rl
+       rec <- hhdat[ID_indiv == i]; inf_d <- rec$inf_day_rl
       for (d in 0:tmax){
         if (!is.na(inf_d) && d > inf_d) break
         rows[[length(rows)+1]] <- list(
@@ -347,4 +349,3 @@ print(result)
 
 
 #saveRDS(result, "result.rds")
- 
